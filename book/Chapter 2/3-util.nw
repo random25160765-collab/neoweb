@@ -1,0 +1,154 @@
+# 文本工具
+
+`util.cpp` 里没有一个字提到 chunk。它只处理字符串与文件——正因为与语法无关，这几段几乎不用改，也最容易被单独测。
+
+它也是唯一不依赖项目内任何别的东西的一层：除了 `nw.hpp`，不 include 任何文件。所以后面每一篇都可以随手调它，而不会把依赖图搅乱。
+
+骨架只有两个包含和一个命名空间开关：
+
+`tangle/util.cpp` 先摆出来：
+
+tangle/util.cpp @
+
+<< util.cpp >>= @
+	#include "nw.hpp"
+
+	namespace nw {
+
+	<< string-utils >>
+	<< lines >>
+	<< html-escape >>
+	<< io >>
+
+	}  // namespace nw
+~@
+
+## 一、前缀、修剪、判断
+
+这四个小函数被调用得极频繁，但需要读懂它们的人只有几个，所以按"读起来最短"写，不按"通用"写。
+
+`has_prefix(s, p)` 里有个容易忽略的点：空前缀恒真。调用处从不传空串，所以这里不做特判——但注释得写明，否则下一个读的人会以为它是 bug。
+
+<< string-utils >>= @
+	// s 是否以 p 开头。注意空 p 恒真，调用处不要传空串。
+	bool has_prefix(const string& s, const string& p) {
+		return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
+	}
+
+	// 去掉行尾的空白与回车。
+	// 必须吃掉 \r：CRLF 文件里每行末尾都有它，留着会让 ">>=\r" 匹配不上。
+	string rtrim(const string& s) {
+		size_t e = s.size();
+		while (e > 0 && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r')) --e;
+		return s.substr(0, e);
+	}
+
+	// 两端都去空白。内部用 rtrim，所以同样吃掉 \r。
+	string trim(const string& s) {
+		size_t b = 0;
+		while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r')) ++b;
+		return rtrim(s.substr(b));
+	}
+
+	// 空行判定：只有空白的行算空。最小缩进计算与空行跳过都用它。
+	bool is_blank(const string& s) { return trim(s).empty(); }
+
+	// 前导空白有多少个字符（tab 记 1，不换算成列宽）。
+	// 用字符数而不是列宽，是因为最小缩进剥离按字符切；两者混用会切错。
+~@
+
+
+## 二、行：切、拼、数缩进
+
+C++ 没有内置的 split，这三件事都得自己写。
+
+`split_lines` 要同时处理两种边界：`\r\n`（Windows 写过的文件）和最后一行没有换行符。后者靠循环结束后再补一次 `push_back`——只保留循环里那一次，最后一个没换行的行会被静静丢掉。
+
+`join_lines` 反过来：每行补一个 `\n`，所以**产物文件末尾一定有换行**。这不是洁癖：POSIX 规定文本文件以换行结尾，`diff` 也会因为末行缺换行而报 `\ No newline at end of file`。
+
+`leading_ws` 只数空格与 tab，不数全角空格——全角空格在代码里就是普通字符，不该被当成缩进。
+
+<< lines >>= @
+	int leading_ws(const string& s) {
+		int n = 0;
+		while (n < static_cast<int>(s.size()) && (s[n] == ' ' || s[n] == '\t')) ++n;
+		return n;
+	}
+
+	// 按 \n 切行，顺带丢掉 \r；末尾没有换行时最后一行也要保留。
+	vector<string> split_lines(const string& src) {
+		vector<string> out;
+		string cur;
+		for (char c : src) {
+			if (c == '\n') {
+				out.push_back(cur);
+				cur.clear();
+			} else if (c != '\r') {
+				cur.push_back(c);
+			}
+		}
+		if (!cur.empty()) out.push_back(cur);  // 文件末尾没换行的情况
+		return out;
+	}
+
+	// 拼回文本：每行后面补一个 \n，所以产物文件末尾一定有换行。
+	string join_lines(const vector<string>& lines) {
+		string out;
+		for (const auto& l : lines) {
+			out += l;
+			out += '\n';
+		}
+		return out;
+	}
+
+~@
+
+
+## 三、转义：只做三个字符
+
+`& < >` 三个。为什么不管引号？因为这个程序生成的属性值一律用双引号包着，文本内容里的双引号在 HTML 里没有特殊含义。
+
+每一处输出都必须过这个函数——包括着色时逐字符的那一支。代码里的 `<` 如果直接进 HTML，整页会在那里断掉。这是全程序唯一的注入面，值得多调一次。
+
+<< html-escape >>= @
+	string html_escape(const string& s) {
+		string out;
+		for (char c : s) {
+			if (c == '&') out += "&amp;";
+			else if (c == '<') out += "&lt;";
+			else if (c == '>') out += "&gt;";
+			else out.push_back(c);
+		}
+		return out;
+	}
+~@
+
+
+## 四、读写：一次读完，一次写完
+
+读用二进制模式：避免 Windows 上把 `\r\n` 改写成 `\n`，那样 `split_lines` 的两条边界就白写了。写用文本模式即可——产物是我们自己拼好的行。
+
+<< io >>= @
+	// 整个文件读进内存。二进制模式：避免 Windows 上把 \r\n 改写成 \n，
+	// 那会让同一份源在不同平台上展开出不同的产物（字节级）。
+	string read_file(const string& path) {
+		std::ifstream in(path, std::ios::binary);
+		if (!in) throw Error(path, 0, "无法打开输入文件");
+		std::ostringstream ss;
+		ss << in.rdbuf();
+		return ss.str();
+	}
+
+	// 写文件，父目录不存在就先建。
+	// 不用临时文件加改名：这一版不做原子写，产物本来就是可重建的。
+	void write_file(const string& path, const string& text) {
+		std::filesystem::path p(path);
+		if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path());
+		std::ofstream out(path, std::ios::binary);
+		if (!out) throw Error(path, 0, "无法写出文件");
+		out << text;
+	}
+~@
+
+~@
+

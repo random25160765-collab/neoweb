@@ -1,0 +1,86 @@
+# 一份文档，两个产物
+
+chunk 名字里的路径就是分组依据：同一个路径的块按顺序拼成一个文件，不同路径各自成文件。
+
+所以"一份源码出多个文件"不需要额外机制，写两个路径就够了。C 项目最常见的一对是头文件与实现文件——这里就拿它们做例子。
+
+### 一、接口
+
+先写头文件。它决定调用方看到的形状，也决定后面实现时不能改形状。
+
+`#ifndef` / `#define` 那两行是**包含守卫**：同一个头文件被两处 `#include` 时，第二次会被挡掉。没有它，编译器会看到同一份声明两遍。
+
+<<tangle/pair.h: guard>>= @
+	#ifndef PAIR_H
+	#define PAIR_H
+~@
+
+正文里说"一个 pair 就是两个整数"，于是结构体这样写。
+
+<<tangle/pair.h: types>>= @
+	typedef struct {
+		int a;
+		int b;
+	} pair;
+~@
+
+函数的声明放在头文件末尾，用 `pair_sum` 这个名字——**名字里带动词**，调用处读起来就是一句话。
+
+<<tangle/pair.h: declarations>>= @
+	int pair_sum(pair p);
+~@
+
+最后收掉守卫。
+
+<<tangle/pair.h: guard-end>>= @
+	#endif
+~@
+
+### 二、实现
+
+实现文件先包含自己的头文件。这不是形式：编译器会拿声明去核对定义，签名写错立刻报错——**让机器替你查，比让人替你查便宜**。
+
+<<tangle/pair.c: includes>>= @
+	#include "pair.h"
+~@
+
+`pair p` 按值传参。两个 `int` 加起来八个字节，拷贝比传指针再解引用便宜，也不必担心调用方改它。
+
+<<tangle/pair.c: pair_sum>>= @
+	int pair_sum(pair p) {
+		return p.a + p.b;
+	}
+~@
+
+### 三、跑一下
+
+示例总要能跑，否则它只是文档。所以再给一份 `main`：它属于 `pair.c` 这个产物（路径写的是 `tangle/pair.c`）。
+
+<<tangle/pair.c: main>>= @
+	#include <stdio.h>
+
+	int main(void) {
+		pair p = {3, 4};
+		printf("3 + 4 = %d\n", pair_sum(p));
+		return 0;
+	}
+~@
+
+编译时要加 `-Itangle`：`#include "pair.h"` 是相对路径，`pair.h` 与 `pair.c` 落在同一个目录里，但编译器默认不找那里。
+
+```
+nw tangle "book/Appendix B/multi-file.nw" .
+cc -Itangle -o pair tangle/pair.c
+./pair        → 3 + 4 = 7
+```
+
+### 四、这带来的一件事
+
+产物是**按路径聚合**的，不是按文件切的。所以：
+
+- 同一个 chunk 不能被两个产物共用（那会写出两份定义）；
+- 想复用的片段就不带路径——见示例四；
+- 一份文档里的块可以交替出现在两个产物里，落盘时各归各的。
+
+第三条是这个示例真正想说明的：**叙述顺序与产物归属完全解耦**。上面几段是"接口 → 实现 → 跑一下"的阅读顺序，而落盘时 `pair.h` 的三块在一边、`pair.c` 的两块在另一边，互不干扰。
+

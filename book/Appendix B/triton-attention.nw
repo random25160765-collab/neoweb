@@ -1,0 +1,122 @@
+# Triton 的 Flash Attention —— 一个 kernel，两种语言
+
+出处：`~/Source/triton/python/tutorials/06-fused-attention.py`。
+
+这一篇**不求可编译**（它需要 GPU 与 Triton 运行时）。它展示的是另一种"跨栈"：同一个文件里，上半段是**调度**，下半段是**算法**，中间那层由编译器填。
+
+### 一、为什么不直接写 CUDA
+
+注意力是 `softmax(QKᵀ / √d) · V`。写成三步，中间那个 `N×N` 矩阵要来回显存两趟——序列一长，**带宽先于算力成为瓶颈**。
+
+Flash Attention 的办法是把 N 切成块，块内做完 softmax 再乘 V，让 `N×N` 矩阵从不落地。这个变换改变的是循环顺序，而循环顺序正是编译器最难替你猜的东西。
+
+### 二、kernel 的形状：每个程序算一行 Q
+
+`grid` 的第一个维度是 Q 的块数。也就是说，**一个 Triton "程序"= 一个线程块**，它负责 `BLOCK_M × HEAD_DIM` 的一小片 Q，沿 K/V 走完全程。
+
+参数里那些 `strides` 是纯机械信息：张量在显存里怎么排。它们全部写成 `tl.constexpr` 之外的运行时参数，因为形状会变、布局不变。
+
+showcase/attention.py @
+
+<<kernel-signature>>= @
+	@triton.jit
+	def _attn_fwd(Q, K, V, sm_scale, Out,
+	              stride_qz, stride_qh, stride_qm, stride_qk,
+	              stride_oz, stride_oh, stride_om, stride_ok,
+	              Z, H, N_CTX, HEAD_DIM: tl.constexpr,
+	              BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, STAGE: tl.constexpr):
+	    # 一个程序 = 一个线程块 = 一片 Q
+	    start_m = tl.program_id(0)
+	    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+	    offs_n = tl.arange(0, BLOCK_N)
+	    offs_k = tl.arange(0, HEAD_DIM)
+~@
+
+### 三、状态：三样东西必须跨块携带
+
+沿 K 走的时候，softmax 的分母还没算完，所以必须一边走一边记：
+
+- `m_i`：到目前为止见过的最大 logit（防止 `exp` 溢出）；
+- `l_i`：到目前为止的指数和（分母）；
+- `acc`：到目前为止的加权和（分子，还没除以 `l_i`）。
+
+这三样就是 online softmax 的全部状态。**注意它们都在寄存器里**，大小是 `BLOCK_M` 量级，不是 `N_CTX`。
+
+<<state>>= @
+	    # 跨 K 块携带的三样：最大值、指数和、未归一化的输出。
+	    m_i = tl.full([BLOCK_M], float("-inf"), tl.float32)
+	    l_i = tl.zeros([BLOCK_M], tl.float32)
+	    acc = tl.zeros([BLOCK_M, HEAD_DIM], tl.float32)
+~@
+
+### 四、内层循环：先算 QK，再算 PV
+
+一次迭代做两件事：`qk = Q · Kᵀ`，然后 `acc += P · V`。中间夹着 softmax 的更新。
+
+`desc_k.load(...)` 这一行是 Hopper 之后的新写法（TMA 描述符），老版本是 `tl.load(K + ...)` 加 mask。**同一段算法，搬运指令换了两代**——这类差异正好该由一段注释交代，而不是让读者去猜为什么这里多了个 `.T`。
+
+<<loop-qk>>= @
+	    for start_n in tl.range(lo, hi, BLOCK_N):
+	        k = desc_k.load([offsetk_y, 0]).T          # Kᵀ：(HEAD_DIM × BLOCK_N)
+	        qk = tl.dot(q, k)                          # (BLOCK_M × BLOCK_N)
+~@
+
+### 五、online softmax：两行代码，一个不变量
+
+这一段是整篇的核。不变量是：**`acc / l_i` 始终等于"到目前为止的精确 softmax 输出"**。
+
+每当看到更大的 logit，就把之前的和按比例缩小——`alpha = exp(m_i - m_ij)` 就是那个比例。指数减去最大值，是为了让 `exp` 不溢出；减去之后必须补回来，补的方式就是乘 `alpha`。
+
+<<online-softmax>>= @
+	        m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
+	        qk = qk * qk_scale - m_ij[:, None]
+	        p = tl.math.exp2(qk)                       # 底数是 2：省一条乘法
+
+	        alpha = tl.math.exp2(m_i - m_ij)           # 旧的缩多少
+	        l_ij = tl.sum(p, 1)
+
+	        acc = acc * alpha[:, None]                 # 旧账按比例缩
+	        acc = tl.dot(p.to(dtype), v, acc)          # 新账加进来
+	        l_i = l_i * alpha + l_ij
+	        m_i = m_ij
+~@
+
+`exp2` 而不是 `exp`：`2^x` 在硬件上有直接指令，`e^x` 要先乘 `log2(e)`。把 `qk_scale` 里那个 `log2(e)` 提前乘进 scale，是这类 kernel 最常见的省指令手法。
+
+### 六、写回：最后才除
+
+循环外一次除法，把未归一化的 `acc` 变成输出。**这是整段算法里唯一一次除法**——放在循环里就是每块除一次，白白多算。
+
+<<store>>= @
+	    acc = acc / l_i[:, None]
+	    out_ptrs = Out + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
+	    tl.store(out_ptrs, acc.to(Out.dtype.element_ty))
+~@
+
+### 七、调度：谁决定 `BLOCK_M` 与 `num_warps`
+
+上面全是算法，一行调优都没有。调优在另一个函数里，写成配置表 + 自动搜索：
+
+<<autotune>>= @
+	@triton.autotune(
+	    configs=[
+	        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=2, num_warps=4),
+	        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_stages=3, num_warps=8),
+	    ],
+	    key=["N_CTX"],
+	)
+~@
+
+`key=["N_CTX"]` 的意思是：**序列长度变了才重新搜**。这是 Triton 与 CUTLASS 最不一样的地方——CUTLASS 把策略写成类型让人选，Triton 把策略写成参数让运行时试。
+
+### 八、这一篇想说明什么
+
+同一个 kernel，两种语言的边界很清楚：
+
+- Python 部分负责**调度**（grid、block、stage、warps）；
+- Triton 部分负责**算法**（循环顺序、状态递推）；
+- 中间那层（寄存器分配、异步拷贝、指令选择）由编译器填。
+
+文学化源码在这里的作用，是把"哪一层在负责什么"写明白——因为读这种代码时，读者最常问的不是"这行干什么"，而是**"这行属于哪一层、我该不该在这层操心"**。
+
+~@

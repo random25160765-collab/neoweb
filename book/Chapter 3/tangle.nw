@@ -1,0 +1,486 @@
+# tangle：把 chunk 拼成产物
+
+一本书里，代码被拆成很多块，块与块用 `<<名字>>` 互相引用。tangle 要做的事只有一件：
+把这些块拼回去，交出**能直接编译的文件**——读起来像作者从头到尾手写的一样。
+
+拼的动作拆开是三步：**查**（这个名字指哪一块）、**防**（会不会绕回自己）、**贴**（把那一块的行贴过来，带上缩进）。
+此外还有两件收尾的事：**分组**（哪些块属于同一个文件）、**排序**（文件里的先后）。
+
+## 一、数据只有两样
+
+一份文档（`Document`）和一堆块（`Chunk`）。`Document` 里三样东西：按出现顺序排的块、一张"身份 → 下标"的索引、以及原文路径（报错要用）。
+
+块的身份是 **(路径, 名字)**，不是名字。同一个 `<<init>>` 可以同时存在于 `a.c` 和 `b.c` 里——它们是两块，不是冲突。
+
+## 二、整份文件长什么样
+
+先看骨架，再看零件。这一篇的代码全部落在 `tangle/tangle.cpp`：
+
+tangle/tangle.cpp @
+
+<< tangle.cpp >>= @
+	#include "nw.hpp"
+
+	namespace nw {
+
+	<< ref-line >>
+	<< lookup >>
+	<< check_cycle >>
+	<< paste_body >>
+	<< expand >>
+	<< group_by_path >>
+	<< order_product >>
+	<< tangle >>
+	<< merge >>
+
+	}  // namespace nw
+~@
+
+顶块里只有三类东西：一行 `#include`、两行命名空间、九行引用。
+
+**这九行引用的顺序就是落盘的顺序。** 想调整谁先谁后，改这里，不用去动各个块的位置。
+于是叙述可以完全按理解的顺序来——先看整条链，再看每一步——而文件里仍按编译要求排
+（比如 `paste_body` 里的前向声明，那是 C++ 的规矩，不是叙述的选择）。
+
+## 三、认出一行是不是引用
+
+展开之前先得能认出来。判断很克制：忽略前导空白后，**整行**必须就是一个 `<<名字>>`。
+
+为什么这么严？因为代码里到处是 `<<`：C++ 的 `a << b`、shell 的 `cmd <<EOF`。行内出现就算引用，这套语法就没法写这两种语言。代价是写不了 `x = <<value>>;` 这种嵌入——那本来也不是它的表达方式。
+
+<< ref-line >>= @
+	// 判断一行是不是引用，是的话拆出名字与缩进。
+	// 规则：忽略前导空白后，整行就是 <<名字>>，前后不许有别的东西。
+	// "整行"这条限制是为了避免把 C++ 的 `a << b` 当成引用。
+	bool ref_line(const string& ln, string& name, string& indent) {
+		int w = leading_ws(ln);
+		string t = trim(ln.substr(w));
+		if (t.size() < 5) return false;                            // 至少 "<<x>>"
+		if (!has_prefix(t, "<<")) return false;
+		if (t.compare(t.size() - 2, 2, ">>") != 0) return false;
+		name = trim(t.substr(2, t.size() - 4));
+		indent = ln.substr(0, w);                                  // 原样保留，稍后加到展开结果上
+		return !name.empty();
+	}
+~@
+
+长度、开头、结尾三个条件都不满足，就当普通代码行。**宁可漏认，不可错认**：漏认的后果是产物里多一行看得见的引用，错认的后果是把一行 C++ 撕成两半。
+
+顺带把缩进带出来——引用行前面有几个空格或 tab，展开时每一行都补上几个。
+
+## 四、名字怎么变成下标
+
+展开的第一步是查。名字有两种写法：带冒号的绝对名（`路径: 名字`），和裸名。
+
+裸名按**作用域逐级向上**找：从这一块所在的命名空间开始，`src/ns0` → `src` → 根。这条规则让内层可以直接用外层的名字，不必写全路径。
+
+<< lookup >>= @
+	// 按索引解析名字：绝对名（`路径: 名字`）直接查表，相对名从 from_path 逐级向上。
+	// defined_only=false 时占位块也算——那是"只声明没有定义"要用的。
+	static size_t lookup_name(const Document& doc, const string& raw, const string& from_path, bool defined_only) {
+		// 只有**单个**冒号才是"路径: 名字"的分隔符：`::` 是块树的分级，属于名字。
+		size_t colon = string::npos;
+		for (size_t k = 0; k < raw.size(); ++k) {
+			if (raw[k] != ':') continue;
+			if (k + 1 < raw.size() && raw[k + 1] == ':') { ++k; continue; }   // 跳过 `::`
+			if (k > 0 && raw[k - 1] == ':') continue;
+			colon = k;
+			break;
+		}
+		if (colon != string::npos) {
+			auto it = doc.index.find(chunk_key(trim(raw.substr(0, colon)), trim(raw.substr(colon + 1))));
+			if (it == doc.index.end()) return SIZE_MAX;
+			if (defined_only && !doc.chunks[it->second].defined) return SIZE_MAX;
+			return it->second;
+		}
+		size_t hole = SIZE_MAX;
+		string p = from_path;
+		while (true) {
+			auto it = doc.index.find(chunk_key(p, raw));
+			if (it != doc.index.end()) {
+				if (doc.chunks[it->second].defined) return it->second;
+				if (hole == SIZE_MAX) hole = it->second;
+			}
+			if (p.empty()) break;
+			size_t k = p.rfind('/');
+			p = (k == string::npos) ? string() : p.substr(0, k);
+		}
+		for (size_t i = 0; i < doc.chunks.size(); ++i)
+			if (doc.chunks[i].name == raw && doc.chunks[i].defined) return i;
+		return defined_only ? SIZE_MAX : hole;
+	}
+
+	// 找不到返回 SIZE_MAX：报错的话术由调用方决定（引用和修饰符说得不一样）。
+	static size_t try_resolve(const Document& doc, const string& raw, const string& from_path) {
+		return lookup_name(doc, raw, from_path, true);
+	}
+
+	// 引用用这个：找不到就报"未定义"；只有占位块时把占位还回去，让展开时报"只声明没有定义"。
+	static size_t resolve_name(const Document& doc, const string& file, const string& raw,
+	                           const string& from_path, int at_line) {
+		size_t idx = try_resolve(doc, raw, from_path);
+		if (idx != SIZE_MAX) return idx;
+		idx = lookup_name(doc, raw, from_path, false);
+		if (idx != SIZE_MAX) return idx;
+		throw Error(file, at_line, "未定义的 chunk：" + raw);
+	}
+~@
+
+三个函数叠在一起，各自解决一个"查到之后"的问题：
+
+- `lookup_name` 是本体，返回下标或 `SIZE_MAX`（无符号整数里那个"不可能是合法下标"的值，当哨兵用）；
+- `try_resolve` 只认**已经赋值**的块——修饰符用它，因为给占位块排序没有意义；
+- `resolve_name` 给引用用：找不到就报"未定义"，只找到占位就把它还回去，好让展开时报出更准的"只声明没有定义"。
+
+有一处细节值得点明：逐级向上时，**占位块不遮蔽真定义**。内层有个只提到没赋值的 `<<x>>`，外层有一个真的，向上找时应该继续走到外层去，而不是停在内层报错。所以先找到的占位只记着（`hole`），继续往上走。
+
+## 五、防：会不会绕回自己
+
+`stack` 是祖先链：从最外层到当前这层，路过哪些块。展开 `<<a>>` 时发现 `a` 已经在链上，就说明它通过若干层引用了自己。
+
+不用"访问过的集合"，因为同一个块被两处引用是**合法复用**——`sort.nw` 里 `<<print_result>>` 被 `main` 引了三次。用集合会把第二次引用误判成环；链只记"我正在谁里面"，那才是环的定义。
+
+<< check_cycle >>= @
+	// 祖先链里已经有这个名字，就说明它通过若干层引用了自己。
+	static void check_cycle(const string& file, size_t idx, const vector<size_t>& stack, int at_line) {
+		for (size_t s : stack)
+			if (s == idx) throw Error(file, at_line, "chunk 循环引用");
+	}
+~@
+
+存**下标**而不是名字：不同命名空间里的同名块是两块，按名字比会互相误判。
+
+## 六、贴：复制行，加缩进
+
+这是全章唯一递归的地方。对块体的每一行：是引用就带着"当前缩进 + 这一行自己的缩进"递归展开；不是就把 `缩进 + 行` 放进结果。
+
+把一块展开后的行数记作 $L(c)$：它体里有 $m$ 行字面，并且引用了 $k$ 个块 $c_1,\dots,c_k$。
+
+$$
+L(c) = m + \sum_{i=1}^{k} L(c_i)
+$$
+
+这个式子说的是"引用是复制，不是指针"——被引用几次就展开几次。它也是环检测存在的理由：引用图里一旦有环，这个递归就没有底，$L(c)$ 根本解不出来。
+
+<< paste_body >>= @
+	// 落盘时维护"这一行来自哪"：源行号断了才插 #line，产物里不会每行一条。
+	// 只对 C/C++ 打开——别的产物里 #line 是语法错。
+	struct Sink {
+		vector<string>& out;
+		bool line_mode;
+		string last_file;
+		int last_line = 0;
+
+		Sink(vector<string>& o, bool on) : out(o), line_mode(on) {}
+
+		void put(const string& text, const string& src, int nw_line) {
+			if (line_mode && nw_line > 0) {
+				// 换了源文件，或者这一行不接着上一行：重新对一次号。
+				if (src != last_file || nw_line != last_line + 1)
+					out.push_back("#line " + std::to_string(nw_line) + " \"" + src + "\"");
+				last_file = src;
+				last_line = nw_line;
+			}
+			out.push_back(text);
+		}
+	};
+
+	// 前向声明：本函数与 expand 互相调用，C++ 要求先见到名字。
+	static void expand(const Document& doc, const string& file, const string& name, const string& indent,
+	                   Sink& sink, vector<size_t>& stack, int at_line, const string& from_path);
+
+	// 把一块的行贴进 sink：引用行递归，普通行加缩进，空行留空。
+	static void paste_body(const Document& doc, const Chunk& c, const string& file, const string& indent,
+	                       Sink& sink, vector<size_t>& stack) {
+		for (size_t k = 0; k < c.body.size(); ++k) {
+			const string& raw = c.body[k];
+			int nw_line = k < c.body_lines.size() ? c.body_lines[k] : 0;
+			// 围栏里的行带 `\x02`：它们是字面文本，剥掉标记就贴，
+			// 不查引用——生成的文件里本来就该有 `<< 名字 >>`。
+			bool literal = !raw.empty() && raw[0] == '\x02';
+			string ln = literal ? raw.substr(1) : raw;
+			string n2, ind2;
+			// 子引用按**这一块**所在的命名空间解析，不是按整份文件。
+			if (!literal && ref_line(ln, n2, ind2))
+				expand(doc, file, n2, indent + ind2, sink, stack, c.line, c.path);
+			else
+				sink.put(ln.empty() ? string() : indent + ln, c.src_file, nw_line);
+		}
+	}
+~@
+
+两个细节。
+
+**空行不加前缀。** `ln.empty() ? string() : indent + ln`——无脑给每行加缩进，空行会变成一串空格，成品里到处是"看着空、其实有空白"的行。某些编辑器会自动裁掉，于是你本地的 diff 和 CI 的 diff 就不一样了。
+
+**前向声明必须留着。** `paste_body` 调 `expand`，`expand` 又调 `paste_body`，C++ 要求用之前先见过名字。这不是"顺序没排好"，是互相递归的固有代价——用任何排序工具都消不掉它。
+
+## 七、展开：查 → 防 → 贴
+
+三步串起来就是 `expand`。它自己不含逻辑，只有顺序：把名字压进 `stack`，贴完再弹出来——正好对应"进这一层、出这一层"。
+
+<< expand >>= @
+@after: paste_body
+	static void expand(const Document& doc, const string& file, const string& name, const string& indent,
+	                   Sink& sink, vector<size_t>& stack, int at_line, const string& from_path) {
+		size_t idx = resolve_name(doc, file, name, from_path, at_line);
+		const Chunk& c = doc.chunks[idx];
+		if (!c.defined) throw Error(file, at_line, "只声明没有定义：" + name);
+		check_cycle(file, idx, stack, at_line);
+		stack.push_back(idx);
+		paste_body(doc, c, file, indent, sink, stack);
+		stack.pop_back();
+	}
+~@
+
+`for (const auto& ln : c.body)` 是范围循环：依次绑定、不拷贝。`auto` 让编译器推类型，只在类型一眼可见时用。
+
+## 八、分组：一个路径一个产物
+
+<< group_by_path >>= @
+	// 按路径分组。用下标而不是 Chunk 副本：后面还要按名字查 @after 的目标。
+	vector<Group> group_by_path(const Document& doc) {
+		vector<Group> groups;
+		map<string, size_t> at;  // 路径 → groups 里的下标
+		for (size_t i = 0; i < doc.chunks.size(); ++i) {
+			const Chunk& c = doc.chunks[i];
+			if (c.path.empty()) continue;  // 纯片段不落盘
+			string disk = disk_path(c.path);   // `src~Makefile` → `src/Makefile`
+			auto it = at.find(disk);
+			if (it == at.end()) {
+				at[disk] = groups.size();
+				Group g;
+				g.path = disk;
+				groups.push_back(g);
+			}
+			groups[at[disk]].chunks.push_back(i);
+		}
+		return groups;
+	}
+~@
+
+遍历所有块，第一次见到某个路径就开一个产物，之后往里追加。分组保持第一次出现的先后——这不是随手定的，它是"没有别的约束时"的默认顺序，必须稳定、可预期。
+
+`disk_path` 把末尾的 `~` 去掉：`tangle/Makefile~` 是"没有后缀的 tangle/Makefile"，落盘时不带那个记号。纯片段（路径为空）不进任何产物。
+
+## 九、排序：偏序补成全序
+
+一个块可以写 `@after: 另一个块`，意思是"落盘时我排在它后面"；`@before:` 反过来。
+
+注意它只说"谁在谁后面"，不说"排第几"。这叫**偏序**。做成 `@order: 30` 那样的序号就是**全序**——插一块要把后面全重编号，改漏一个不会报错，只会让顺序悄悄错位。
+
+**什么时候需要它？** 如果一篇书的所有块都被顶块串起来了（像第二章各篇），顺序由顶块决定，这一节用不上。需要它的是**没有顶块**的情形：几块并列地写在同一个文件命名空间里，谁先谁后只能靠声明。
+
+偏序落不了盘——写文件必须一行接一行——所以要补成全序。做法是拓扑排序，比名字朴素：
+
+1. 数一遍每块还有几个前置没排（`left[k]`）；
+2. 在"前置都排好了"的块里，挑**文档位置最靠前**的那个；
+3. 每放进一个，把它所有后继的"还差几个"减一；
+4. 直到排完。一轮里一个都挑不出来，就是成环。
+
+第 2 步为什么按文档位置挑？因为约束没说的部分不该被算法偷偷决定。两块互不相欠时保持作者写的顺序，是唯一不让人意外的选择。
+
+<< order_product >>= @
+@long
+	// 把一组 chunk 排成落盘顺序：先满足 @after 约束，其余保持文档顺序。
+	// 每轮从"前置都排好了"的块里挑文档位置最靠前的一个——这就是拓扑排序。
+	vector<size_t> order_product(const Document& doc, const vector<size_t>& group,
+	                                    const string& path, const string& file) {
+		// 名字 → 组内位置，用来把 @after 的名字翻成一条边
+		map<string, size_t> local;
+		for (size_t k = 0; k < group.size(); ++k) local[doc.chunks[group[k]].name] = k;
+
+		vector<vector<size_t>> next(group.size());  // next[k]：排在 k 后面的块
+		vector<size_t> left(group.size(), 0);       // left[k]：k 还差几个前置
+		// 修饰符里的名字走同一套索引：`路径: 名字` 是绝对名，裸名字按本块所在的命名空间
+		// 逐级向上找。找到之后还必须落在本产物里——跨文件的先后由文件顺序决定，不在这儿管。
+		map<size_t, size_t> pos;  // chunks 下标 → 组内位置
+		for (size_t k = 0; k < group.size(); ++k) pos[group[k]] = k;
+
+		auto target_of = [&](const string& nm, size_t k, const char* what) {
+			size_t idx = try_resolve(doc, nm, doc.chunks[group[k]].path);
+			if (idx == SIZE_MAX)
+				throw Error(file, doc.chunks[group[k]].line,
+				            string(what) + " 找不到这个 chunk：" + nm);
+			auto it = pos.find(idx);
+			if (it == pos.end())
+				throw Error(file, doc.chunks[group[k]].line,
+				            string(what) + " 的目标不在同一个产物里：" + nm + "（它属于 " +
+				                (doc.chunks[idx].path.empty() ? "片段" : disk_path(doc.chunks[idx].path)) +
+				                "，本产物是 " + path + "）");
+			return it->second;
+		};
+
+		for (size_t k = 0; k < group.size(); ++k) {
+			// @after X：k 排在 X 后面 → 边 X → k
+			for (const auto& nm : doc.chunks[group[k]].after) {
+				next[target_of(nm, k, "@after")].push_back(k);
+				++left[k];
+			}
+			// @before X：k 排在 X 前面 → 边 k → X（方向相反，别混）
+			for (const auto& nm : doc.chunks[group[k]].before) {
+				size_t t = target_of(nm, k, "@before");
+				next[k].push_back(t);
+				++left[t];
+			}
+		}
+
+		vector<size_t> out;
+		vector<bool> done(group.size(), false);
+		while (out.size() < group.size()) {
+			size_t pick = group.size();  // 用"越界"表示这一轮没得挑
+			for (size_t k = 0; k < group.size(); ++k)
+				if (!done[k] && left[k] == 0) {
+					pick = k;
+					break;
+				}
+			if (pick == group.size()) {
+				string stuck;
+				for (size_t k = 0; k < group.size(); ++k)
+					if (!done[k]) stuck += (stuck.empty() ? "" : "、") + doc.chunks[group[k]].name;
+				throw Error(file, doc.chunks[group[0]].line, "@after 成环，这些块互相等待：" + stuck);
+			}
+			done[pick] = true;
+			out.push_back(group[pick]);
+			for (size_t nx : next[pick]) --left[nx];
+		}
+		return out;
+	}
+~@
+
+`@after` 是边 `目标 → 本块`，`@before` 是边 `本块 → 目标`——方向相反，写反了不会报错，只会让顺序诡异地错。目标走同一套索引解析（绝对名、逐级向上都行），但必须落在**本产物**里：跨文件的先后由文件顺序决定，不归这里管。
+
+`pick = group.size()` 借"越界"当哨兵，省掉一个 `bool found`。
+
+## 十、落盘
+
+分组 → 排序 → 落盘，三个循环嵌套得很直白：外层走产物，中层走排好序的块，内层走块里的行。
+
+`Sink` 是这一层唯一的机关：它记住"这一行来自 `.nw` 的哪一行"，**行号断了才插一条 `#line`**。每行都插，产物里一半是 `#line`，人没法读，diff 也没法看；一条都不插，编译错误只能指到 `.cpp`，读的人还得自己换算回 `.nw`。
+
+只在 C/C++ 产物上开：`#line` 是预处理指令，写进 `Makefile` 或 YAML 就是语法错。所以判断按产物后缀走，不看命令行想不想——只有认得行号指令的产物才配得上它。
+
+这条能力的用处只有一个：**`.nw` 里的编译错误，报的就是 `.nw` 的行号**。`nw run` 把它默认打开（《命令行》）。
+
+<< tangle >>= @
+@long
+	// 只有 C/C++ 的产物认 #line 指令；写进 Makefile 或 YAML 里就是语法错。
+	static bool is_c_like(const string& path) {
+		size_t dot = path.rfind('.');
+		if (dot == string::npos) return false;
+		string ext = path.substr(dot);
+		return ext == ".c" || ext == ".h" || ext == ".cc" || ext == ".cpp" ||
+		       ext == ".hpp" || ext == ".cxx";
+	}
+
+	// 分组 → 排序 → 落盘。分组顺序决定产物的次序，排序决定文件里的行序。
+	vector<Product> tangle(const Document& doc, const string& file, bool line_mode) {
+		vector<Product> products;
+		vector<Group> groups = group_by_path(doc);
+		// 产物之间不能互为父子：`src/x.c` 是文件，`src/x.c/ns0` 就把它当目录了。
+		// 这类错误在写盘时只会得到一句 filesystem error，不如在这里点名。
+		for (size_t a = 0; a < groups.size(); ++a) {
+			for (size_t b = a + 1; b < groups.size(); ++b) {
+				const string& x = groups[a].path;
+				const string& y = groups[b].path;
+				bool x_in_y = x.size() > y.size() && x.compare(0, y.size(), y) == 0 && x[y.size()] == '/';
+				bool y_in_x = y.size() > x.size() && y.compare(0, x.size(), x) == 0 && y[x.size()] == '/';
+				if (x_in_y)
+					throw Error(file, doc.chunks[groups[a].chunks[0]].line,
+					            "产物路径冲突：" + y + " 是文件，不能同时当 " + x + " 的目录");
+				if (y_in_x)
+					throw Error(file, doc.chunks[groups[b].chunks[0]].line,
+					            "产物路径冲突：" + x + " 是文件，不能同时当 " + y + " 的目录");
+			}
+		}
+		for (const auto& g : groups) {
+			Product p;
+			p.path = g.path;
+			// 一个产物一个 sink：块与块之间的行号本来就不连续，跨块处会自动补 #line。
+			Sink sink(p.lines, line_mode && is_c_like(p.path));
+			for (size_t i : order_product(doc, g.chunks, g.path, file)) {
+				const Chunk& c = doc.chunks[i];
+				// v2：只有"文档层声明 + 单段名字 + 有定义"的块才落盘。
+				if (!c.defined || c.inside || c.name.find("::") != string::npos) continue;
+				// 块与块之间空一行：散文里的分隔不该只存在于阅读版，
+				// 产物也要能读。片段展开（expand）不插空行，那是"一句话换行"。
+				if (!p.lines.empty() && !p.lines.back().empty()) sink.put(string(), c.src_file, 0);
+				// 祖先链从当前 chunk 起算：块引用自己也要被查出来。
+				vector<size_t> stack(1, i);
+				for (size_t k = 0; k < c.body.size(); ++k) {
+					const string& raw = c.body[k];
+					int nw_line = k < c.body_lines.size() ? c.body_lines[k] : 0;
+					// 围栏里的行带 `\x02`：剥掉标记原样落盘，不查引用。
+					bool literal = !raw.empty() && raw[0] == '\x02';
+					string ln = literal ? raw.substr(1) : raw;
+					string n2, ind2;
+					if (!literal && ref_line(ln, n2, ind2))
+						expand(doc, file, n2, ind2, sink, stack, c.line, c.path);
+					else
+						sink.put(ln, c.src_file, nw_line);
+				}
+			}
+			products.push_back(p);
+		}
+		return products;
+	}
+~@
+
+三处讲究：
+
+- **祖先链从当前块自己起算**。块引用自己（`<<a>>` 里写 `<<a>>`）不经过任何递归就是环，空栈会让它漏过去。
+- **只有顶层块落盘**。被顶块引用过的块（`inside`）已经贴在别人身上，再落一次就是重复定义。
+- **块与块之间空一行**。散文里的分隔不该只存在于阅读版；片段展开（`expand`）不插空行，那是"一句话换行"。
+
+还有一处防御：产物之间不能互为父子（`src/x.c` 与 `src/x.c/ns0`）。这类错误拖到写盘只会得到一句 filesystem error，不如在这里点名。
+
+## 十一、多篇合成一份
+
+一本书有很多篇，一个程序只有一份产物。各篇分别 tangle 会互相覆盖——拆分章节时遇到的第一个坑。
+
+所以 tangle 之前先把各篇的块按传入顺序接成一份文档。合并只做这一件事：接起来、建索引。**重名必须报错**：两篇里各有一个 `<<main>>`，拼出来会有两份定义，而编译器报的位置跟你的源文件毫无关系。
+
+只有一种重名不算错：**一篇里先引用、另一篇里才定义**。占位（`defined` 还是假）不是定义，它只说明"这里会有一块"；真定义来了就该接上。位置仍归第一次提及的那个块——`inside` 留着，落盘位置由引用处决定，这一条与"先声明后使用"是同一件事的两面。
+
+这不是补丁：一份产物横跨几篇之后，顶块在最前面那一篇、零件散在后面几篇，是常态（第四章的 `weave.cpp` 就是这样）。没有这一条，书一拆章就要么编译不过，要么把零件抄两遍。
+
+<< merge >>= @
+	// 把多篇的 chunk 合成一份文档。
+	// 一本书可以有很多篇，而一个程序只该有一份产物——所以 tangle 之前先把
+	// 各篇的 chunk 按传入顺序接起来。重名必须报错：两篇里各有一个 <<main>>，
+	// 拼出来的产物会出现两份定义，而编译器报的位置跟源文件毫无关系。
+	Document merge(const vector<Document>& docs, const string& file) {
+		Document out;
+		for (const auto& d : docs) {
+			for (const auto& c : d.chunks) {
+				// 身份是 (路径, 名字)：不同产物下同名是合法的，同一产物下同名才是冲突。
+				auto it = out.index.find(chunk_key(c.path, c.name));
+				if (it != out.index.end()) {
+					Chunk& old = out.chunks[it->second];
+					// 占位让位给真定义：先引用、后定义是拼书时的常态，不是重定义。
+					// 位置与"首次提及在别的块里"这个事实留着，体换成真定义。
+					if (!old.defined && c.defined) {
+						int line = old.line;
+						bool inside = old.inside;
+						old = c;
+						old.line = line;
+						old.inside = inside;
+						continue;
+					}
+					if (old.defined && !c.defined) continue;   // 真定义在前，占位不必再记
+					string who = c.path.empty() ? c.name : c.path + " 的 " + c.name;
+					throw Error(file, c.line,
+					            "chunk 重定义：" + who + "（另一篇里已定义过，见其第 " +
+					                std::to_string(old.line) + " 行）");
+				}
+				out.index[chunk_key(c.path, c.name)] = out.chunks.size();
+				out.chunks.push_back(c);
+			}
+		}
+		return out;
+	}
+~@
+
+不做"后者覆盖前者"这种自作聪明的事——两份真定义各有各的意图，不该被悄悄合并成一种。占位让位是唯一被承认的例外：占位没有体，谈不上覆盖谁的意图。
+
+~@

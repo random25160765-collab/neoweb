@@ -1,0 +1,264 @@
+# 类型与边界
+
+前一篇讲"这份文本长什么样"，从这一篇起讲"程序拿它怎么存"。第二章 剩下的三篇各产一个文件，顺序就是读的顺序：
+
+| 产物 | 内容 | 为什么单独一个文件 |
+|---|---|---|
+| `tangle/nw.hpp` | 类型与接口：`Chunk`、`Document`、`Error`、各阶段函数声明 | 五个 `.cpp` 共用同一套模型，只能有一份 |
+| `tangle/util.cpp` | 文本工具：前缀判断、按行切、HTML 转义、读写 | 与语法无关，换成别的语言也用得上 |
+| `tangle/parse.cpp` | 解析器本体 | 只依赖上面两个 |
+
+这一篇只产第一个。它是整个程序的边界：先有类型，才谈得上实现；类型定错了，后面两篇都要返工。
+
+## 一、头文件：一个文件管边界
+
+`nw.hpp` 是五个编译单元的公共部分，所以它得自己包含所需的标准库——不能指望某个 `.cpp` 先包含了再 include 它。
+
+头里只放两样：**模型**（数据长什么样）与**声明**（谁提供什么函数）。没有一行实现，所以谁都敢 include 它。
+
+## 二、块与文档：模型
+
+块是这一篇的中心类型。它记六样：名字、产物路径、体、**体里每一行来自第几行**、它写在哪个 `.nw` 里、块头行号；再加三个装配用的字段（顺序声明、内外标记、是否已赋值）。
+
+逐行记来源，是为了 `#line`（第三章）。只记块头那一行的话，编译错误只能指到块的开头——差十行与差一行，找起来是两个工作量。`body_lines` 与 `body` 平行，而 `dedent` 只改内容不改行数，所以两者永远对得上。
+
+记 `src_file` 是因为合并：一本书由很多篇拼成，而 `#line` 里的文件名必须是那个块**真正写在哪篇**，不是命令行最后给的那一篇。
+
+tangle/nw.hpp @
+
+<< nw.hpp >>= @
+	// 由 book/Chapter 2/*.nw 生成，请勿手改。
+	//
+	// 这个头文件是模块边界：只有类型与声明，没有实现。
+	// 五个 .cpp 各自 include 它；谁在边界内、谁在边界外，看这一个文件就够。
+	#ifndef NEOWEB_NW_H
+	#define NEOWEB_NW_H
+
+	// 标准库按用途分三组：字符/流、容器、文件系统。
+	// 只用到这些，没有第三方依赖——一个一千来行的程序不值得引入依赖树。
+	#include <cctype>      // isalnum：weave 里生成锚点用
+	#include <cstdio>      // std::to_string 之外的零散用途
+	#include <cstdlib>     // system：run 起一条命令
+	#include <filesystem>  // 建父目录、判断路径有没有目录部分
+	#include <fstream>     // 整文件读入、写出
+	#include <iostream>    // usage 与错误输出
+	#include <map>         // chunk 名 → 下标
+	#include <sstream>     // 拼 HTML、把整个文件读进字符串
+	#include <cstddef>     // size_t：下标用，别处不出现
+	#include <string>
+	#include <vector>
+
+	// 全部实现放进命名空间，只为了让文件末尾的 main 保持三行，
+	// 读者一眼就能看到"程序从这里进、错误在那里收"。
+
+	using std::map;
+	using std::string;
+	using std::vector;
+
+	namespace nw {
+
+	<< error >>
+	<< document >>
+	<< api >>
+
+	}  // namespace nw
+	
+	#endif  // NEOWEB_NW_H
+~@
+
+<< document >>= @
+@long
+	// 一个 chunk：名字、产物路径、体、以及它在源文件里的行号。
+	// body 已经剥掉了最小公共缩进，所以可以直接拼接。
+	struct Chunk {
+		string name;
+		string path;           // 空 = 纯片段，不落盘
+		vector<string> after;
+		vector<string> before;  // 落盘时排在这些块之后（只约束同一产物内）
+		vector<string> body;
+		vector<int> body_lines;  // 与 body 平行：每一行来自源文件第几行（--debug 用）
+		string src_file;         // 这个块写在哪个 .nw 里（合并多篇后仍要分得清）
+		int line = 0;      // chunk 头所在行号，报错用
+		bool defined = false;  // 有体才算定义过（只有声明的块不许落盘）
+		bool inside = false;   // 首次提及在别的 chunk 里：位置由那个块决定
+		bool long_ok = false;  // 体里写了 @long：这个块长是有意的，别为长度报警
+	};
+
+	// chunk 的身份是 (路径, 名字) 这个二元组，不是名字本身。
+	// 路径已经写在名字里了，所以 sort.c 的 merge 与 parse.cpp 的 merge 是两回事；
+	// 用一个不可能出现在路径或名字里的分隔符把它们拼成 map 的键。
+	inline string chunk_key(const string& path, const string& name) {
+		return path + '\x1f' + name;
+	}
+
+	// 有后缀就是文件（`src/a.c`）；没有后缀的文件在末尾加 `~` 转义（`src/Makefile~`）；
+	// 两者都没有就是文件夹。落盘时把末尾那个 `~` 去掉。
+	inline bool is_file_path(const string& path) {
+		if (!path.empty() && path.back() == '~') return true;
+		size_t k = path.rfind('/');
+		string last = (k == string::npos) ? path : path.substr(k + 1);
+		return last.find('.') != string::npos;
+	}
+
+	inline string disk_path(const string& path) {
+		if (!path.empty() && path.back() == '~') return path.substr(0, path.size() - 1);
+		return path;
+	}
+
+	// 文档顺序里的一个节点：散文、代码块、或者一条待办。
+	// 三者交替出现，weave 按顺序渲染；tangle 只看 Code 节点指向哪一个 chunk。
+	enum class NodeKind { Prose, Code, Todo };
+
+	struct Node {
+		NodeKind kind = NodeKind::Prose;
+		vector<string> lines;  // Prose / Todo 的原文行
+		size_t chunk_at = 0;   // Code 指向 chunks 的下标（名字只在作用域内有意义，下标没有歧义）
+		int line = 0;
+	};
+
+	// 一份文档的完整解析结果。
+	// index 的键是 (路径, 名字)，让"按身份查找"不必线性扫。
+	struct Document {
+		vector<Node> nodes;
+		vector<Chunk> chunks;
+		map<string, size_t> index;
+	};
+	// 落盘单位：一个产物（一个文件）与它的行。
+	struct Product {
+		string path;
+		vector<string> lines;
+	};
+
+	// 一组：一个产物路径与落进它的 chunk 下标（保持文档出现顺序）。
+	struct Group {
+		string path;
+		vector<size_t> chunks;
+	};
+
+	// 站点里的一页：地址、标题、所属部。
+	struct Page {
+		string url;
+		string title;
+		string group;
+	};
+
+	// 书目录：整本 → 若干部 → 若干文件。
+	struct BookPart {
+		string title;
+		vector<string> files;
+	};
+
+	struct Book {
+		string title;
+		vector<BookPart> parts;
+	};
+
+	// 展平后的一项：文件路径（仓库相对）+ 所属部的标题。
+	struct BookPage {
+		string path;
+		string part;
+	};
+~@
+
+`Chunk` 里的 `path` 是**已经在命名空间里解析过**的路径：写在 `@ src/a.c` 之后的块，`path` 就是 `src/a.c`；写在正文里、没进任何命名空间的块，`path` 为空——那种块叫**片段**，不落盘，只能被引用。
+
+`after` / `before` 是修饰符收集来的顺序声明；`inside` 表示"第一次被提到时在别人的体里"，这种块不单独落盘（位置由外层决定）；`defined` 表示"赋过值"，只声明没赋值的块在展开时会报错；`long_ok` 记的是"作者说过这个块长"——`@long` 压住的唯一一条警告就是长度。
+
+`Document` 是整份文档：节点序列（散文与块按出现顺序排）、块数组、以及**索引**——键是 `(路径, 名字)` 这个二元组，值是块数组的下标。
+
+索引的键不是名字，这一点在第一章定过：`a.c` 的 `merge` 与 `b.c` 的 `merge` 是两个块。用二元组做键，查重的判据和引用解析的判据就统一了。
+
+## 三、错误与警告只要三样
+
+报错信息里只有三件事有用：哪个文件、第几行、什么错。其余都是噪音。
+
+警告是同一个形状，只是**不中断**：退出码照旧是 0，产物照旧写出来。两者的分工很硬——错误是"这份源不成立"，警告是"这份源成立，但你可能没注意到某件事"。
+
+谁负责打印？不在这里。`Error` 与 `Warn` 都只拼字符串，写 stderr 的是命令行那一层。理由是可断言：库函数一旦自己往 stderr 写，测试就只能靠抓管道；把"产生"与"打印"分开，警告才和错误一样能被测。
+
+<< error >>= @
+	// 错误只带三样：哪个文件、第几行、什么错。
+	// 不做错误码、不做分类——这一版没有任何调用方需要按类型分支处理。
+	struct Error {
+		string file;
+		int line = 0;  // 0 表示"没有行号"，例如打不开文件
+		string msg;
+
+		Error(string f, int l, string m) : file(std::move(f)), line(l), msg(std::move(m)) {}
+
+		// 拼成编辑器能点开的格式：file:12: 什么错
+		// 没有行号时只输出 file: 什么错，避免出现 "file:0:" 这种噪音。
+		string where() const {
+			if (line > 0) return file + ":" + std::to_string(line) + ": " + msg;
+			return file + ": " + msg;
+		}
+	};
+
+	// 警告与错误同形，只多一个 warn: 前缀——编辑器点得开，grep 分得清。
+	struct Warn {
+		string file;
+		int line = 0;
+		string msg;
+
+		string where() const {
+			if (line > 0) return file + ":" + std::to_string(line) + ": warn: " + msg;
+			return file + ": warn: " + msg;
+		}
+	};
+~@
+
+警告的来源只有一类：**语法层的风格**（现在只有"块太长"这一条）。它不依赖产物、不依赖落盘，所以放在 `parse.cpp` 里对整份文档扫一遍，叫 `lint`——名字借自编译器社区，做的是同一件事。
+
+## 四、接口：按阶段分组
+
+`<< api >>` 是按阶段排的声明：文本工具、解析、tangle、weave、命令行。顺序就是调用顺序——谁先被用到，谁先出现。
+
+声明放头里、定义回各 `.cpp`，是 C++ 里唯一能躲开"函数必须先定义"这个麻烦的常规做法。代价是改签名要动两处；好处是哪一层依赖哪一层，读这一节就清楚了。
+
+<< api >>= @
+	// ---- 文本工具（util.cpp）----
+	string rtrim(const string& s);
+	string trim(const string& s);
+	bool has_prefix(const string& s, const string& p);
+	bool is_blank(const string& s);
+	int leading_ws(const string& s);
+	vector<string> split_lines(const string& src);
+	string join_lines(const vector<string>& lines);
+	string html_escape(const string& s);
+	string read_file(const string& path);
+	void write_file(const string& path, const string& text);
+
+	// ---- 解析（parse.cpp）----
+	Document parse(const string& src, const string& file);
+	bool fence_open(const string& ln, string& run);
+	bool fence_close(const string& ln, const string& run);
+	// 语法层的风格检查：只提警告，不改产物。谁打印由调用方决定。
+	vector<Warn> lint(const Document& doc, const string& file);
+
+	// ---- 展开与组装（tangle.cpp）----
+	bool ref_line(const string& ln, string& name, string& indent);
+	vector<Group> group_by_path(const Document& doc);
+	vector<size_t> order_product(const Document& doc, const vector<size_t>& group,
+	                             const string& path, const string& file);
+	// line_mode：给 C/C++ 产物插 `#line`，让编译错误指回 .nw 的行（见第三章）。
+	vector<Product> tangle(const Document& doc, const string& file, bool line_mode = false);
+	Document merge(const vector<Document>& docs, const string& file);
+
+	// ---- 渲染与站点（weave.cpp）----
+	string render_document(const Document& doc, const string& file, const string& title,
+	                       const string& toc, const string& pager);
+	int write_site(const vector<Document>& docs, const vector<Page>& pages, const string& dir);
+	vector<Page> pages_of(const vector<Document>& docs, const vector<string>& inputs,
+	                      const vector<string>& parts);
+	string page_title(const Document& doc, const string& path);
+	Book read_book(const string& path);
+	vector<BookPage> book_pages(const Book& b);
+
+	// ---- 命令行（main.cpp）----
+	int run(int argc, char** argv);
+~@
+
+最后把命名空间关上。 
+
+~@
+

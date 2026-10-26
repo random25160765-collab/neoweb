@@ -1,0 +1,83 @@
+# 纯片段，与延迟落盘
+
+前三个示例的 chunk 都带路径，一块就是文件的一段。这个示例讲前面没讲的两件事：
+
+- **纯片段**：名字里没有冒号，不落盘，只能被引用；
+- **`@after:`**：叙述顺序与落盘顺序分开。
+
+### 一、依赖
+
+先交代依赖：这个程序要 `printf`，所以先 `#include`。
+
+它在文档里排第一，落盘也在第一——不是因为它特殊，而是因为它没有任何 `@after:` 约束，而其余各块都排在它后面（拓扑排序里"没被约束的按文档位置挑"）。
+
+<<tangle/fragment.c: includes>>= @
+	#include <stdio.h>
+~@
+
+### 二、先看程序长什么样
+
+三行输出，上下各一条分隔线：
+
+```
+---
+- alpha
+- beta
+---
+```
+
+`main` 里那两条分隔线是同一句话，所以写成引用。**引用必须整行**——`<<rule>>` 独占一行（前面可以有缩进），不能插在一行中间；tangle 只认整行。
+
+缩进会加到展开内容的每一行，所以下面 `main` 里的引用缩进一个 tab，展开出来也是缩进一个 tab。
+
+这一块还声明了 `@after: print_rule, print_line`：叙述上先给读者看整体形状，落盘时必须排在两个被调用的函数之后。C 要求先声明后使用，**叙述不欠这个债，落盘得还**。
+
+<<tangle/fragment.c: main>>= @
+@after: print_rule, print_line
+	int main(void) {
+		<<rule>>
+		print_line("alpha");
+		print_line("beta");
+		<<rule>>
+		return 0;
+	}
+~@
+
+### 三、被引用的片段
+
+`<<rule>>` 只有一句调用。名字里没有路径，所以它不会落盘——它只是"这句话在这里出现一次"的缩写。
+
+片段复用的是**代码**，不是参数：同一个片段被两处引用，展开出来就是两份一模一样的代码。想要参数不同，就得写两个片段，或者干脆不用片段。这不是缺陷，是它的定义。
+
+<<rule>>= @
+	print_rule();
+~@
+
+### 四、两个被调用的函数
+
+`print_rule` 打一条分隔线。没有参数，也不必知道调用者是谁。
+
+<<tangle/fragment.c: print_rule>>= @
+	static void print_rule(void) {
+		printf("---\n");
+	}
+~@
+
+`print_line` 打一个列表项。参数写成 `const char *` 而不是 `char *`：这个函数不打算改调用方的字符串，那就别给它改的权限。
+
+<<tangle/fragment.c: print_line>>= @
+	static void print_line(const char *name) {
+		printf("- %s\n", name);
+	}
+~@
+
+### 五、核对
+
+```
+nw tangle "book/Appendix B/fragment.nw" .
+sed -n '1,14p' tangle/fragment.c   → #include 在最前，main 在最后
+cc -o fragment tangle/fragment.c
+./fragment                          → 三行输出
+```
+
+落盘顺序是 `#include` → `print_rule` → `print_line` → `main`，而阅读顺序是 `#include` → `main` → 片段 → 两个函数。除了第一块，其余的顺序都被 `@after:` 改过——**两份顺序各自成立**，第三章的"排序"一节就是干这个的。

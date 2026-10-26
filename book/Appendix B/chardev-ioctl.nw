@@ -1,0 +1,148 @@
+# 一个字符设备驱动 —— 内核的文体
+
+出处：`~/Source/tt-share/tt-kmd/chardev.c`（Tenstorrent 的设备驱动）。
+
+这一篇**不求可编译**（它需要内核头文件与真实硬件）。选它是因为内核代码有一套自己的文体：`goto` 回滚链、引用计数、`__user` 标注、错误码用负数。这些东西在不熟的人眼里像噪音，在熟的人眼里是**每一条都对应一类真实事故**。
+
+### 一、设备的形状：五个钩子
+
+用户态看到的 `/dev/tenstorrent/0` 就是一个文件。`open`、`release`、`ioctl`、`mmap` 四个动作绑到四个函数上——**内核只认这五个钩子，不认你的架构**。
+
+`.owner` 那一行防的是"模块卸载了但设备还开着"：`THIS_MODULE` 让内核在有人持有文件时不肯卸载。
+
+showcase/chardev.c @
+
+<<fops>>= @
+	static const struct file_operations tt_cdev_fops = {
+	    .owner   = THIS_MODULE,
+	    .open    = tt_cdev_open,
+	    .release = tt_cdev_release,
+	    .unlocked_ioctl = tt_cdev_ioctl,
+	    .mmap    = tt_cdev_mmap,
+	};
+~@
+
+### 二、注册：三条资源，一条回滚链
+
+内核里没有异常，只有返回值。所以"申请三样资源"这件事会写成三段 `if (res < 0) goto X`，末尾挂三条标号，按**申请的反序**释放。
+
+这不是老派：内核栈上没有 RAII，也没人愿意在中断上下文里看到析构顺序错乱。
+
+<<register>>= @
+	int init_char_driver(unsigned int max_devices)
+	{
+	    int res = alloc_chrdev_region(&tt_device_id, 0, max_devices, TENSTORRENT);
+	    if (res < 0)
+	        goto alloc_failed;
+
+	    tt_dev_class = class_create(TENSTORRENT);
+	    if (IS_ERR(tt_dev_class)) {
+	        tt_dev_class = NULL;
+	        res = -ENODEV;
+	        goto class_failed;
+	    }
+	    return 0;
+
+	class_failed:
+	    unregister_chrdev_region(tt_device_id, max_devices);
+	alloc_failed:
+	    return res;
+	}
+~@
+
+注意 `IS_ERR` 而不是 `< 0`：内核里指针的错误被编进地址的高位，用 `PTR_ERR` / `IS_ERR` 区分，因为指针本身没有负数可用。
+
+### 三、open 与 release：谁在持有设备
+
+`open` 里做的事很少：把设备结构塞进 `file->private_data`，给引用计数加一。`release` 里减一，减到零才真正释放。
+
+计数用 `kref` 而不是 `atomic_t`：它的语义是"最后一个放手的人负责拆房子"，而这正是设备驱动最怕搞错的地方。
+
+<<open-release>>= @
+	static int tt_cdev_open(struct inode *inode, struct file *file)
+	{
+	    struct tt_device *dev = container_of(inode->i_cdev, struct tt_device, cdev);
+	    kref_get(&dev->refcount);
+	    file->private_data = dev;
+	    return 0;
+	}
+
+	static int tt_cdev_release(struct inode *inode, struct file *file)
+	{
+	    struct tt_device *dev = file->private_data;
+	    kref_put(&dev->refcount, tt_device_release);
+	    return 0;
+	}
+~@
+
+`container_of` 是内核里最常见的"向下转型"：你手里只有成员的地址，要靠它在结构体里的偏移倒推出外层对象。C 没有继承，这是唯一的办法。
+
+### 四、ioctl：号码里编着方向与大小
+
+`_IOWR(TENSTORRENT, 0x01, struct tt_ioctl_arg)` 不是随机数：它把**方向**（读/写/双向）、**类型**、**序号**、**参数大小**编进一个 32 位数。内核只靠这个数就能判断"用户传的缓冲区够不够大"。
+
+`copy_from_user` 不能换成 `memcpy`：用户态地址可能根本没映射，`memcpy` 会直接把内核打崩；`copy_from_user` 会返回"拷了几个字节没成功"，让调用方有机会拒绝。
+
+<<ioctl>>= @
+	static long tt_cdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+	{
+	    struct tt_device *dev = file->private_data;
+	    void __user *uarg = (void __user *)arg;
+	    struct tt_ioctl_arg in;
+
+	    if (copy_from_user(&in, uarg, sizeof(in)))
+	        return -EFAULT;
+
+	    switch (cmd) {
+	    case TT_IOCTL_GET_INFO:
+	        in.vendor_id = dev->vendor_id;
+	        in.device_id = dev->device_id;
+	        in.bar_size  = dev->bar_size;
+	        if (copy_to_user(uarg, &in, sizeof(in)))
+	            return -EFAULT;
+	        return 0;
+	    default:
+	        return -ENOTTY;   // 不认识的命令，这个错误码是约定
+	    }
+	}
+~@
+
+`__user` 这个标注不产生代码，它只给静态检查器看：**凡是标了 `__user` 的指针，都不许直接解引用**。把约定写成类型，机器替你守。
+
+### 五、mmap：把设备的地址空间借给用户态
+
+`mmap` 是这类驱动最主要的通路：几十 MB 的环形队列不走 `read`/`write`，直接映射进用户态，双方靠内存次序通信。
+
+`remap_pfn_range` 的参数是**页帧号**而不是物理地址：内核里一切按页算，`>> PAGE_SHIFT` 就是那次换算。
+
+<<mmap>>= @
+	static int tt_cdev_mmap(struct file *file, struct vm_area_struct *vma)
+	{
+	    struct tt_device *dev = file->private_data;
+	    unsigned long size = vma->vm_end - vma->vm_start;
+
+	    if (size > dev->bar_size)
+	        return -EINVAL;
+	    if (remap_pfn_range(vma, vma->vm_start,
+	                        dev->bar_phys >> PAGE_SHIFT, size,
+	                        vma->vm_page_prot))
+	        return -EAGAIN;
+	    return 0;
+	}
+~@
+
+### 六、这一篇想说明什么
+
+内核代码的每一行几乎都能回答"不加这一句会出什么事"：
+
+| 写法 | 不加的后果 |
+|---|---|
+| `goto` 回滚链 | 申请失败时漏放资源，第二次 `insmod` 直接失败 |
+| `kref` | 设备还在用就被卸载，野指针 |
+| `copy_from_user` | 用户态传个坏地址，内核崩 |
+| `__user` | 有人图省事直接解引用，编译期没人拦 |
+| `-ENOTTY` 而不是 `-1` | 用户态分不清"命令不支持"和"参数错" |
+
+文学化编程在这里的价值不是"解释语法"，而是**把事故写成注释的位置**：每一段散文都对着一条"不加会怎样"。这种代码，注释不是装饰，是维修手册。
+
+~@

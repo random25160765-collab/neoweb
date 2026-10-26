@@ -1,0 +1,111 @@
+# 目录
+
+这是一本用文学化编程写成的书，也是一个能跑的工具。同一份源，tangle 抽出代码、weave 抽出文档——**论证不外在于被论证的东西**。
+
+## 序：屎山与带宽
+
+AI 写代码的速度超过了人读代码的速度。这不是修辞——它正在制造一种新的工程病：代码能跑，但没人说得清它为什么这么跑。
+
+四类理解障碍紧跟着出现：意图缺失（代码只说"怎么做"，不说"为什么"）、结构淹没（逻辑被切碎在几十个文件里，主线看不见）、抽象不一致（同一概念三处三种写法）、修改痕迹不可见（一次 patch 改了语义，没记录它改了什么）。
+
+更深的病是**成本外部化**：AI 产出的理解成本被转嫁给每一个读者，每个人都要重复付一遍语法展开、模式识别、领域前提的税。传统项目靠"默认知识共享 + 师徒传递"消化这些成本，但在跨栈、AI 大量参与、人员流动快的项目里，这套机制失效了。
+
+这本书想治的就是这个断裂。
+
+## 章次
+
+目录不是另一份文件，就是下面这一段：它既是这一页的正文（你正在读），也是机器读的数据——`nw tangle` 把它抽成 `tangle/tools/book.yaml`，`nw weave` 据此排页、算上下章。
+
+放在这里，是因为"这本书有哪几篇、按什么顺序读"本来就是目录章要说的话。早期版本把它单独放在一个 `book/book.yaml` 里，后果看得见：同一份章次在正文里又手写了一遍，两边各自长，正文那份漏掉了附录 C 与 `hello` 示例。**两份清单迟早不一致，而目录一旦不一致，读者走的就是另一本书。**
+
+那为什么不让 `nw` 直接读这一页的正文？因为正文是散文，顺序藏在排版里；机器要的是一份明确的清单。所以清单写成 chunk：人读它的样子，机器读它的行。
+
+这也不是"先有鸡还是先有蛋"：目录章本来就是书的一篇，不需要先有站点才能写。tangle 只是构建时的一步，不是写作的前置条件。
+
+<<tangle/tools/book.yaml: 目录>>= @
+@long
+	# 这本书的目录。顺序就是阅读顺序，parts 就是网站上的分章。
+	# 由 book/menu.nw tangle 得到——别手改这个文件，要改目录就改上面那一页。
+	#
+	# 路径相对仓库根：这个文件落在 tangle/tools/，和书的源不在一个目录，
+	# 所以不能按它自己的位置去解析路径。
+	#
+	# 只认这几种行（缩进是给人看的，解析只认行首关键字）：
+	#   title: 书名
+	#   parts:
+	#   - title: 部的名字
+	#     files:
+	#       - 仓库相对路径
+	# 其余一律报错并给出行号——格式写错时，人该知道错在哪。
+
+	title: 文学编程
+
+	parts:
+	  - title: 序
+	    files:
+	      - book/menu.nw
+
+	  - title: 第 1 章 为什么是文学编程
+	    files:
+	      - book/Chapter 1/1-history.nw
+	      - book/Chapter 1/2-crisis.nw
+	      - book/Chapter 1/3-attempt.nw
+	      - book/Chapter 1/4-decisions.nw
+	      - book/Chapter 1/5-outlook.nw
+
+	  - title: 第 2 章 语法与基本结构
+	    files:
+	      - book/Chapter 2/0-guide.nw
+	      - book/Chapter 2/1-syntax.nw
+	      - book/Chapter 2/2-types.nw
+	      - book/Chapter 2/3-util.nw
+	      - book/Chapter 2/4-parse.nw
+
+	  - title: 第 3 章 tangle
+	    files:
+	      - book/Chapter 3/tangle.nw
+
+	  - title: 第 4 章 weave
+	    files:
+	      - book/Chapter 4/1-markdown.nw
+	      - book/Chapter 4/2-render.nw
+	      - book/Chapter 4/3-site.nw
+	      - book/Chapter 4/4-book.nw
+
+	  - title: 第 5 章 与人协作
+	    files:
+	      - book/Chapter 5/cli.nw
+	      - book/Chapter 5/tutorial.nw
+	      - book/Chapter 5/man.nw
+	      - book/Chapter 5/plugin.nw
+
+	  - title: 第 6 章 与 agent 协作
+	    files:
+	      - book/Chapter 6/collab.nw
+
+	  - title: 附录 A 基础设施
+	    files:
+	      - book/Appendix A/construct.nw
+	      - book/Appendix A/tools.nw
+	      - book/Appendix A/control.nw
+
+	  - title: 附录 B 可运行案例
+	    files:
+	      - book/Appendix B/hello.nw
+	      - book/Appendix B/multi-file.nw
+	      - book/Appendix B/fragment.nw
+	      - book/Appendix B/sort.nw
+	      - book/Appendix B/cutlass-gemm.nw
+	      - book/Appendix B/triton-attention.nw
+	      - book/Appendix B/chardev-ioctl.nw
+
+	  - title: 附录 C 参考资料
+	    files:
+	      - book/Appendix C/references.nw
+~@
+
+## 这本书怎么长出来的
+
+它先是几份互不相干的笔记：一份排序算法的旧笔记、一份语法草案、一个解析器、一个编辑器插件。把它们整理成一本书的过程本身也是需求——**读者要有方向**，否则再好的实现也只是几坨并排的代码。
+
+所以章节顺序不是代码的依赖顺序，而是**读者建立心理模型的顺序**：先知道为什么，再知道语法长什么样，然后才是怎么实现的、怎么协作、怎么在编辑器里用。目录树是产物形态，章节是阅读地图。

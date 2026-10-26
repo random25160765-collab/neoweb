@@ -1,0 +1,15 @@
+# 元层（手写，入库）：*.nw、Makefile、bootstrap.py、.gitignore
+# 其余全部是次生产物：留着就是同一个事实的两份，而两份迟早不一致。
+
+tangle/*
+weave/
+
+# Python 字节码
+__pycache__/
+*.pyc
+
+.DS_Store
+*.swp
+
+# 浏览器实测留下的临时快照（playwright-cli 自己往这里写）
+.playwright-cli/

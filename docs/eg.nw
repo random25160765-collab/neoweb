@@ -1,0 +1,210 @@
+语法提供一个对于整个代码仓库的抽象。命名空间（namespace）是对文件夹与文件层面的抽象，chunk树是文件内部的抽象。
+
+首先是namespace。namespace的作用域用 @ 和 ~@ 表示。
+
+举个例子：
+
+1.
+src @
+weave.cpp @
+
+<< a >> {
+
+}
+
+2.
+@ weave.cpp
+
+~tangle.cpp @
+
+@ tangle.cpp
+
+~@ src
+
+或者
+
+src/weave.cpp @
+
+<< a >> {
+	......
+}
+
+~@ 
+
+---
+
+如果不指定namespace，那么就要在chunk头里写。比如：
+
+<< src~weave.cpp: a >> {
+	......
+}
+
+或者:
+
+src @
+
+<< weave.cpp: a >> {
+
+}
+
+~@ src
+
+---
+
+~@ 后面的那个东西可以省略，但也可以写上。如果写上，就必须写对。
+
+举个例子：
+
+src @
+weave @
+markdown.cpp @
+
+~@
+~@
+~@
+
+---
+
+语法对和空格不敏感。以下几种都是合法的：
+
+1.
+src @ weave @ markdown @ ~@~@~@
+src @ weave @ markdown @ ~@ markdown ~@ weave ~@ src
+
+2.
+src @
+	weave @
+		markdown.cpp @
+
+		<< chunk_0 >> {
+			#include <stdio.h>
+			int main() {
+				return 0;
+			}
+		}
+
+		~@ 
+	~@ 
+~@
+
+3.
+src/weave/markdown.cpp @ ~@
+src/Makefile~ @ ~@
+
+---
+
+namespace就是tangle后的代码组织模式。“/”就是代表子文件夹的意思。如果有后缀（比如.cpp），那就是文件。文件是最小的namespace。
+
+然后是chunk。
+
+首先是<< chunk >>完全可以在文本里面，没必要另起一行。
+
+举个例子：
+
+@ src/example.c
+我们来写一个简单的示例程序：hello world。首先我们要先导入输出的头文件，也就是<< include >>= { #include <stdio.h> }，注意这里不要加分号；然后是main函数：<< main >>= {
+	int main() {
+		<< hello >>
+	}
+}
+
+这里的 hello 我们这么写：
+<< hello >>= {
+	printf("Hello world!\n");
+	return 0 // 最后不要忘了return 0！
+}
+
+看明白了吗？这里涉及chunk的声明机制。无论是叙述中，还是代码中，第一次提到就是对chunk声明了。声明完之后就是我们的具体实现。如果是在chunk里声明，那chunk的位置已经确定了。如果是在chunk外面声明，那么默认按照声明顺序来组织，但如果有位置限定的装饰则除外。一般而言尽量不要用位置限定装饰，应该是自顶向下把整个代码都组织好。比如：
+
+<< top_chunk >>= {
+	<< do_A >> // 先做A
+	<< do_B >> // 再做B
+	<< do_C >> // 再做C
+}
+
+<< do_A >>= {
+	<< A_0 >>
+	<< A_1 >>
+	...
+}
+
+当然要是这样写也不是不可以：<< top_chunk >>= {<< do_A >> << do_B >> << do_C >>}————就是很难看。推荐使用缩进。
+
+嵌套chunk怎么办？
+可以这么写：
+<< top_chunk::do_A >>
+<< top_chunk::do_A::A_0 >>
+
+然后<< chunk_name >>的语法，你要给它做一个<<和>>的自动补全。
+
+一个chunk的覆盖机制：我可以这样：
+
+...因此我们暂时把x写成这样：<< x >>= {
+	...... // 一种比较早的写法
+}
+
+因为...所以，之前的写法有漏洞，我们要这么写：<< x >>= {
+	...... // 新的写法
+}
+
+也就是说，新写法覆盖旧写法，tangle的时候应采取最后一种新的写法。
+
+chunk是有作用域归属的。可以这样：
+
+src @
+	<< a >>
+	namespace_0 @
+		<< a >> 
+	@~
+	namespace_1 @
+		<< a >> 
+	@~
+@~
+
+另外，你需要为这些语法规则写一整套单元测试。
+
+然后是修饰符。修饰符修饰的是chunk，一般在chunk的最前面，以@开头。
+
+常见的修饰符有：位置修饰符 after 和 before；其他修饰符 todo（这里可以做扩展）
+
+<< chunk_0 >>= {
+@after chunk_name
+	<< A >>
+	<< B >>
+	...
+}
+
+@after chunk_name
+@before chunk_name
+
+这个chunk_name就是chunk的名字，也就是作用域+chunk作用域+chunk名
+这种位置修饰符特别适合用来向较远的空间插入一大段代码。
+
+chunk的索引机制已经初见端倪。举个例子（刻意从顶层开始写）：
+<< src/weave/markdown.cpp: top_chunk::do_A::A_0::a >>
+
+关于定义和赋值的区分：
+
+<< a >>第一次出现是声明（如果不在chunk里，那就是该文件的顶层chunk。如果没有文件作用域，报错。）。不可以重复声明。
+出现一次之后，必须要进行赋值操作：<< a >>= {}（我还是把=加上）。
+赋值之后，这个<< a >>符号就可以到处用了（后面就是引用。注意这里的“引用”实际上就是字符串粘贴！就像在C里面定义了一个宏然后到处用，但宏本身只有一个！！！索引的时候，只指向最初的那个chunk，而不是引用的chunk）
+如果再来一次<< a >>=，那就是重新赋值。
+
+然后就是对chunk进行修改——这个之前提过，你要区分到底是赋值还是定义并声明。
+
+另外，你需要为nw处理器定义“编译”错误的友好提示。
+
+---
+
+换句话说，整份文件是一棵chunk树。几个根chunk，展开一个chunk树。其实很像宏定义。
+
+
+————
+
+梳理一下：基本的理念就是把最终的仓库结构抽象成命名空间+chunk的树，分界线在文件。
+
+文件夹和文件这样区分：
+
+
+src/a/b/c~d.c @
+src~Makefile @

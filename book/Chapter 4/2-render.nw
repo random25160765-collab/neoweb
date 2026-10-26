@@ -1,0 +1,454 @@
+# 从结构到 HTML
+
+上一篇把散文变成了一串块级元素。这一篇把这些元素写成 HTML：先补 Markdown 之外的几样渲染（代码块、图、公式），再从样式表一路讲到整份文档，最后是每篇的身份。
+
+产物还是同一份 `weave.cpp`，所以这一篇也挂在它名下：
+
+tangle/weave.cpp @
+
+## 一、代码块：交给 Source-highlight
+
+着色也不再自己写。第一版按后缀猜四类记号（注释、字符串、数字、关键字），判据是字符扫描——它不认识语法，只认识"长得像"。真正的着色要从语法树来，那件事已经决定交给别人做。
+
+GNU Source-highlight 用语言定义文件（`/usr/share/source-highlight/*.lang`）做真正的词法着色，输出走 `htmlcss.outlang`：`<span class="keyword">` 这种形式，正好接得上我们自己的 CSS。
+
+两个必须处理的细节。第一，输出自带外壳（生成器注释 + `<pre><tt>`），而外层由调用方给——所以取 `<pre>` 与 `</pre>` 之间，再剥掉 `<tt>`。
+
+> [!warn] 认不出的语言宁可不着色
+> 不是硬套一个默认语言。着色错了只是颜色不对；把代码当别的语言扫，可能把 `<` 吞进 span 里，那就不只是颜色问题了。
+
+第二件事写在下面这条上：语言映射表里没有的标注，一律走转义。
+
+每块代码构造一次 `SourceHighlight` 要读 `.lang` 与 `.style`。本书几百块代码，量级是几秒——还没到必须缓存的地步，等它真慢再说。
+
+<< highlight >>= @
+	// 着色：GNU Source-highlight，htmlcss.outlang 出 span class。
+	// 认不出的语言原样转义——宁可不着色，也不猜。
+	static string highlight(const string& code, const string& info) {
+		static const map<string, string> kLang = {
+		    {"c", "c.lang"},        {"h", "cpp.lang"},       {"cpp", "cpp.lang"},
+		    {"cc", "cpp.lang"},     {"hpp", "cpp.lang"},     {"py", "python.lang"},
+		    {"js", "javascript.lang"}, {"mjs", "javascript.lang"},
+		    {"sh", "sh.lang"},      {"bash", "sh.lang"},     {"make", "makefile.lang"},
+		    {"makefile", "makefile.lang"},
+		};
+		auto it = kLang.find(info);
+		if (it == kLang.end()) return html_escape(code);
+		string html;
+		try {
+			srchilite::SourceHighlight sh("htmlcss.outlang");
+			sh.setStyleFile("default.style");
+			std::istringstream in(code);
+			std::ostringstream out;
+			sh.highlight(in, out, it->second);
+			html = out.str();
+		} catch (...) {
+			return html_escape(code);
+		}
+		// 剥掉它自带的外壳（生成器注释与 <pre><tt>）：外层由调用方给。
+		size_t a = html.find("<pre>");
+		size_t b = html.rfind("</pre>");
+		if (a == string::npos || b == string::npos) return html_escape(code);
+		string inner = html.substr(a + 5, b - a - 5);
+		size_t t0 = inner.find("<tt>");
+		size_t t1 = inner.rfind("</tt>");
+		if (t0 != string::npos && t1 != string::npos) inner = inner.substr(t0 + 4, t1 - t0 - 4);
+		return inner;
+	}
+
+~@
+
+## 二、图与公式：weave 只标注，构建末尾再画
+
+`dot` 围栏不在这里画。weave 只把它标成 `<pre class="dot">`，画图交给构建末尾的后处理器：调 `dot -Tsvg`，把 `<svg>` 那一段直接嵌进页面。
+
+理由是依赖方向。weave 一旦在渲染时 fork 一个外部命令，它就依赖"这台机器装了什么"——同一份 `.nw` 在两台机器上会长出两种页面。挪到构建末尾，weave 仍然只做"读文件、写文件"，缺 `dot` 的机器看到的是源码块，不是错误。
+
+公式走同一条路，但直接留下 `$…$` 页面就不能读。所以后处理器把它换成 **MathML**：浏览器原生认识，一个式子三百来字节，不需要脚本、不需要字体文件。代价是排版细节跟着浏览器走，换来的是"一份 HTML 就是一个文件"——这个交换在这本书里划得来。
+
+两件事都由 `tangle/build/enhance` 做（源见 [[tools.nw]]）：扫一遍 `weave/*.html`，认三个形状——`<pre class="dot">`、`<span class="math">`、`<div class="math-block">`——能换的换掉，换不掉的留着。
+
+一个细节值得记：同一页里两张图，dot 给节点起的名字都是 `node1`、`edge1`。不处理的话，第二张图的箭头会指到第一张图的节点上——**不报错，只是画错**。所以后处理器给每张图的 id 加前缀。
+
+## 三、样式：一份 HTML 就是一整份文件
+
+每个 chunk 渲染成一个 `figure`，标题行写"名字 → 产物路径"。这不是排版偏好：它让读者在 HTML 里也能一眼看出这段代码会落到哪个文件，而这件事在纯 Markdown 预览里是看不见的。
+
+引用行单独染色（`span.ref`），因为它们是整份文档里唯一"指向别处"的东西；`@todo:` 变成一个 aside，pending 的东西应该显眼而不是埋在段尾。
+
+CSS 内联在输出里，不引外部文件：一份 HTML 就是一个文件，拷到哪儿都能看。
+
+样式表内联在程序里，不另存一个 `.css`。理由只有一条：**一份 HTML 就是一份文件**——拷到任何地方都能看，不依赖同目录的样式表。代价是改样式要重新编译，但样式一年改不了几次。
+
+样式里那四条规则是给着色用的：注释、字符串、数字各一条，最后一条把 `.keyword`、`.type`、`.usertype`、`.preproc` 归到同一个颜色。名字不是我们编的：`htmlcss.outlang` 把 style 文件里的记号名原样写进 `class`。着色只负责判断"这个词属于哪一类"，颜色由这里决定——分类是逻辑，颜色是审美，改颜色不该动代码。
+
+没写规则的那几类（`.symbol`、`.function`、`.cbracket`、`.normal`）保持正文色。样式表只覆盖它真想强调的东西，这比"每一类都配一个颜色"更像一份能读的代码页。
+
+版式是两栏：`aside.toc` 在左，`main.page` 在右。为什么是两栏、为什么侧栏用 `sticky` 而不是 `fixed`，见 2.6.2——那是导航的问题，不是配色的问题。
+
+<< css >>= @
+@long
+	// 内联样式表。存在的理由是"一份 HTML 就是一份文件"，
+	// 拷到任何地方都能看，不依赖同目录的 css。
+	static const char* css() {
+		return R"CSS(
+	:root { color-scheme: light; }
+	* { box-sizing: border-box; }
+	body { margin: 0; background: #fdfdfc; color: #1b2733;
+	       font: 16px/1.72 -apple-system, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+	       -webkit-font-smoothing: antialiased; }
+	a { color: #a4463c; text-decoration: none; }
+	a:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+	/* 两栏：左目录常驻，右正文。目录长过一屏时滚的是它自己。 */
+	.shell { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3.5rem;
+	         max-width: 72rem; margin: 0 auto; padding: 0 2rem; }
+	aside.toc { position: sticky; top: 0; align-self: start; max-height: 100vh; overflow-y: auto;
+	            padding: 2rem 1.4rem 3rem 0; border-right: 1px solid #ebeee8; font-size: .86rem; }
+	aside.toc .home { display: inline-block; margin: 0 0 1.4rem; color: #8b969f;
+	                  font-size: .76rem; letter-spacing: .08em; }
+	aside.toc .part { margin: 1.6rem 0 .4rem; color: #a8b2b9; font-size: .72rem; letter-spacing: .08em; }
+	aside.toc ul { list-style: none; margin: 0; padding: 0; }
+	aside.toc li a { display: block; padding: .3rem .1rem .3rem .75rem; margin-left: -.76rem;
+	                 color: #52606b; border-left: 2px solid transparent; line-height: 1.45; }
+	aside.toc li a:hover { color: #1b2733; background: #f4f6f3; text-decoration: none; }
+	aside.toc li a.here { color: #a4463c; border-left-color: #a4463c; font-weight: 600; }
+
+	main.page { max-width: 45rem; padding: 2rem 0 6rem; }
+	main.page.single { margin: 0 auto; padding: 4rem 1.5rem 6rem; }
+
+	h1 { font-size: 1.95rem; line-height: 1.32; letter-spacing: -.012em; margin: 0 0 2.2rem; }
+	h2 { font-size: 1.28rem; line-height: 1.45; margin: 2.9rem 0 .9rem; }
+	h3 { font-size: 1.02rem; line-height: 1.5; margin: 2.2rem 0 .5rem; }
+	p { margin: 0 0 1.05rem; }
+	ul, ol { margin: 0 0 1.1rem; padding-left: 1.4rem; }
+	li { margin: .25rem 0; }
+
+	code { font-family: ui-monospace, "JetBrains Mono", Consolas, monospace; font-size: .87em;
+	       background: #f1f3ef; padding: .12em .36em; border-radius: 4px; }
+	pre { background: #fbfcf9; border: 1px solid #e3e6df; border-radius: 10px;
+	      padding: .95rem 1.1rem; overflow: auto; margin: 0 0 1.3rem; }
+	pre code { background: none; padding: 0; font-size: .84rem; line-height: 1.62; }
+	table { border-collapse: collapse; width: 100%; margin: 0 0 1.3rem; font-size: .93rem; }
+	th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #e6e8e3; vertical-align: top; }
+	th { font-weight: 600; color: #3d4a56; border-bottom: 1px solid #cfd4cd; }
+	tbody tr:last-child td { border-bottom: none; }
+	.comment { color: #8b9691; font-style: italic; }
+	.string, .specialchar { color: #7a6a2f; }
+	.number { color: #9a5a3c; }
+	.keyword, .type, .usertype, .preproc { color: #8d4a6d; }
+	figure.chunk { margin: 1.8rem 0; }
+	figcaption { display: flex; gap: .6rem; margin: 0 0 .35rem; font: .78rem ui-monospace, monospace; }
+	figcaption .cseq { color: #9aa5ad; font-variant-numeric: tabular-nums; }
+	figcaption .cname { color: #a4463c; font-weight: 600; }
+	figcaption .cpath { color: #7a8794; }
+	span.ref { color: #a4463c; font-weight: 600; }
+	aside.todo { margin: 1.2rem 0; padding: .6rem .9rem; font-size: .92rem;
+	             border-left: 3px solid #d8a657; background: #fdf6e6; border-radius: 0 6px 6px 0; }
+	aside.callout { margin: 1.3rem 0; padding: .7rem 1rem; font-size: .95rem;
+	                border-left: 3px solid #9fb3c8; background: #f4f7fa; border-radius: 0 6px 6px 0; }
+	aside.callout p { margin: 0 0 .45rem; }
+	aside.callout p:last-child { margin-bottom: 0; }
+	.callout-title { font-weight: 600; }
+	.callout-warn { border-left-color: #c9743c; background: #fdf3e9; }
+	.callout-tip { border-left-color: #6b9e78; background: #eef6f0; }
+	.callout-danger { border-left-color: #a4463c; background: #fbf0ef; }
+	span.math { font-family: "Latin Modern Math", "STIX Two Math", serif; }
+	div.math-block { margin: 1rem 0; padding: .4rem 0; text-align: center; overflow-x: auto; }
+	math { font-size: 1.05em; }
+	figure.diagram { margin: 1.8rem 0; text-align: center; }
+	figure.diagram svg { max-width: 100%; height: auto; }
+
+	/* 底部翻页：两张等宽卡片，头尾空白处也占位，位置不随页跳。 */
+	nav.pager { display: flex; gap: 1rem; margin: 3.2rem 0 0; padding-top: 1.6rem;
+	            border-top: 1px solid #ebeee8; font-size: .9rem; }
+	nav.pager a, nav.pager span { flex: 1 1 0; }
+	nav.pager a { padding: .7rem .9rem; border-radius: 10px; color: #52606b; }
+	nav.pager a:hover { background: #f4f6f3; color: #1b2733; text-decoration: none; }
+	nav.pager .next { text-align: right; }
+
+	/* 目录页：一行一项，整行可点。字号略小、行距略紧，二十四项才不至于拖成两屏。 */
+	ul.toc { list-style: none; padding: 0; margin: 0 0 1.2rem; }
+	ul.toc li { margin: 0; }
+	ul.toc li a { display: block; padding: .3rem .8rem; margin: 0 -.8rem; font-size: .96rem;
+	              border-radius: 8px; color: #33414c; }
+	ul.toc li a:hover { background: #f4f6f3; text-decoration: none; }
+	h2.part { margin: 2.4rem 0 .5rem; font-size: .78rem; letter-spacing: .08em;
+	          color: #a8b2b9; font-weight: 600; }
+
+	/* 窄屏：退成单栏，目录变成顶部一条可横滑的篇名条。
+	   不折成汉堡：那要一个按钮和一段脚本；竖着铺开会把首屏撑满，还不如横着滑。 */
+	@media (max-width: 62rem) {
+		.shell { display: block; max-width: 46rem; padding: 0 1.25rem; }
+		aside.toc { position: sticky; top: 0; z-index: 2; max-height: none; padding: .65rem 0;
+		            border-right: none; border-bottom: 1px solid #ebeee8; background: #fdfdfc;
+		            overflow-x: auto; overflow-y: hidden; white-space: nowrap; }
+		aside.toc .home, aside.toc .part { display: none; }
+		aside.toc ul { display: inline; }
+		aside.toc li { display: inline; }
+		aside.toc li a { display: inline-block; padding: .2rem .1rem; margin: 0 .9rem 0 0;
+		                 border-left: none; }
+		aside.toc li a.here { border-left: none; }
+		aside.toc::-webkit-scrollbar { height: 4px; }
+		aside.toc::-webkit-scrollbar-thumb { background: #dfe3db; border-radius: 2px; }
+		main.page { max-width: none; padding: 1.8rem 0 4rem; }
+	}
+	)CSS";
+	}
+
+~@
+
+`R"CSS( … )CSS"` 是 C++11 的**原始字符串**：括号里的内容原样保留，反斜杠、引号、换行都不必转义。CSS 里到处是引号和花括号，用普通字符串会写成一片反斜杠。
+
+## 四、锚点：chunk 名不能直接当 HTML id
+
+chunk 名允许中文和空格（`<<tangle/parse.cpp: parse>>`），但 HTML 的 `id` 里出现这些东西，在某些浏览器和锚点链接里会出问题。所以渲染前先压一遍：只留字母数字，其余压成单个连字符。
+
+中文会被压成连字符，这是有意的——`id` 只需要唯一且安全，不需要保持名字原样；名字本身在标题里原样显示。
+
+<< anchor >>= @
+	// 把 chunk 名变成 HTML id：只留字母数字，其余压成单个连字符。
+	// chunk 名允许中文和空格，直接当 id 会在某些浏览器里出问题。
+	static string anchor(const string& s) {
+		string out;
+		for (char c : s) {
+			unsigned char u = static_cast<unsigned char>(c);
+			if (std::isalnum(u)) out.push_back(c);
+			else if (!out.empty() && out.back() != '-') out.push_back('-');
+		}
+		return out;
+	}
+
+~@
+
+`static_cast<unsigned char>(c)` 不是多余的：`char` 可能是有符号的，中文的 UTF-8 字节往往是负数，直接把负数交给 `isalnum` 是未定义行为。
+
+## 五、序号：读者要能核对落盘顺序
+
+落盘顺序由顶块的引用定，读者扫一遍正文看不出谁先谁后。所以 weave 在每块标题前印一个序号。
+
+这个序号不是章节编号，而是**它在这个产物里的真实行序**：`product_order` 调的是 tangle 用的那套 `group_by_path` + `order_product`，一份实现、两处调用。如果哪天两边不一致，说明其中一个错了——这比"再写一个排序函数"安全得多。
+
+纯片段没有序号：它不落盘。
+
+<< product_order >>= @
+	// 落盘 chunk 在各自产物里的序号（从 1 起）。纯片段不在表里。
+	// 复用 tangle 的排序：读者看到的序号，就是文件里真实的行序。
+	static map<size_t, size_t> product_order(const Document& doc, const string& file) {
+		map<size_t, size_t> seq;
+		for (const auto& g : group_by_path(doc)) {
+			vector<size_t> order = order_product(doc, g.chunks, g.path, file);
+			for (size_t k = 0; k < order.size(); ++k) seq[order[k]] = k + 1;
+		}
+		return seq;
+	}
+
+~@
+
+## 六、一个 chunk 渲染成什么样
+
+一个 chunk 在 HTML 里是一个 `<figure>`：上面一行标题写"名字 → 产物路径"，下面是代码。用 `figure` 而不是 `div`，因为它本来就该是"带标题的插图"。
+
+代码整块交给 `highlight`，不是一行一行送。理由不是省事：Source-highlight 是有状态的，`/* … */` 这种跨行注释靠它记住"现在还在注释里"；拆成一行一次，第二行起就会被当成普通代码，颜色断在中间。
+
+**引用行单独包一层** `<span class="ref">`——读者要能一眼分出"这一行是引用，不是代码"。这是 `ref_line` 的第二次登场：tangle 用它决定展开，weave 用它决定染色，判断标准只有一份。实现上先整块着色、再按行拆回去，引用行用转义后的原文替换掉。
+
+<< render_chunk >>= @
+	// 一个 chunk 渲染成一个 figure：标题行给出"第几块 → 名字 → 产物路径"。
+	// 代码整块着色后按行拆回，引用行用转义后的原文替换。
+	static string render_chunk(const Chunk& c, size_t seq) {
+		std::ostringstream out;
+		out << "<figure class=\"chunk\" id=\"c-" << anchor(c.name) << "\">\n";
+		out << "<figcaption>";
+		// 序号是它在这个产物里的真实行序，不是章节编号：读者据此核对落盘顺序。
+		if (seq) out << "<span class=\"cseq\">#" << seq << "</span>";
+		out << "<span class=\"cname\">&lt;&lt;" << html_escape(c.name) << "&gt;&gt;</span>";
+		// 纯片段没有路径，写明它不落盘——否则读者会以为忘了写。
+		if (!c.path.empty()) out << "<span class=\"cpath\">→ " << html_escape(c.path) << "</span>";
+		else out << "<span class=\"cpath\">纯片段</span>";
+		out << "</figcaption>\n<pre><code>";
+
+		// 语言从产物路径的后缀来；纯片段没有路径，就不着色（也无从推断）。
+		string base = c.path;
+		size_t slash = base.rfind('/');
+		if (slash != string::npos) base = base.substr(slash + 1);
+		string ext;
+		size_t dot = base.rfind('.');
+		if (dot != string::npos) ext = base.substr(dot + 1);
+		if (base == "Makefile") ext = "makefile";   // 这份产物没有后缀
+
+		// 围栏里的行带 `\x02`：剥掉标记；引用行记下来，着色后单独替换。
+		vector<string> lines;
+		vector<bool> refs;
+		string code;
+		for (const auto& raw : c.body) {
+			bool literal = !raw.empty() && raw[0] == '\x02';
+			string ln = literal ? raw.substr(1) : raw;
+			string n2, ind2;
+			refs.push_back(!literal && ref_line(ln, n2, ind2));
+			lines.push_back(ln);
+			code += ln;
+			code += '\n';
+		}
+		vector<string> hl = split_lines(highlight(code, ext));
+
+		for (size_t k = 0; k < lines.size(); ++k) {
+			if (refs[k]) out << "<span class=\"ref\">" << html_escape(lines[k]) << "</span>";
+			else out << (k < hl.size() ? hl[k] : html_escape(lines[k]));
+			out << '\n';
+		}
+		out << "</code></pre>\n</figure>\n";
+		return out.str();
+	}
+
+~@
+
+`n.chunk_at` 是下标而不是名字：名字只在产物作用域里有意义（第三章「排序」一节之后更是如此），下标没有歧义。
+
+
+## 七、整份文档：三种节点排成一页
+
+整份文档按 `nodes` 的顺序走：散文交给 cmark 的适配层，代码块交给上一节那个函数，待办变成一条侧栏。三种节点的先后就是作者写的先后——这里不做任何重排，**重排是 tangle 的事**（第三章「排序」一节）。
+
+外壳单独一个函数：`page_shell`。三个消费者共用它——正文页、目录页、单页。head 里的东西（charset、viewport、内联样式）只该写一遍；三处各抄一份，迟早有一处忘了改。
+
+`viewport` 那行现在不是可选项：版式是两栏，窄屏要退成一栏，没有它移动端会按桌面宽度渲染，再好的断点也白写。
+
+外壳还带一小段脚本，只干一件事：**记住侧栏滚到哪了**。点目录是一次整页加载，`aside.toc` 在新页里从 0 开始——读者明明停在「第 4 章」，翻过去又得从头往下找。脚本在滚动时把位置写进 `sessionStorage`，加载时先复原；第一次进来没有记录，就把当前篇滚到中间。它不折目录、不拦点击，只补这一道缝。函数就和外壳写在同一块里：它只被外壳调用，独立成块反而要多一条顺序声明。
+
+<< page-shell >>= @
+	// 跳页会丢掉侧栏的滚动位置：每次点目录都是一次整页加载，
+	// aside.toc 从 scrollTop 0 开始，于是刚翻到第 4 章，下一页又回到序。
+	// 离开前把位置记进 sessionStorage，回来先复原；没有记录时（第一次进来）
+	// 把当前篇滚到中间——目录里"你在哪"得一眼看得见。
+	static const char* toc_script() {
+		return R"JS(
+	(function () {
+	  var t = document.querySelector('aside.toc');
+	  if (!t) return;
+	  var key = 'nw.toc.scroll';
+	  var saved = sessionStorage.getItem(key);
+	  if (saved !== null) {
+	    t.scrollTop = +saved;
+	  } else {
+	    var cur = null, links = t.querySelectorAll('a');
+	    for (var i = 0; i < links.length; i++) {
+	      if (links[i].pathname === location.pathname) { cur = links[i]; break; }
+	    }
+	    if (cur) t.scrollTop = Math.max(0, cur.offsetTop - t.clientHeight / 2);
+	  }
+	  t.addEventListener('scroll', function () {
+	    sessionStorage.setItem(key, t.scrollTop);
+	  }, { passive: true });
+	})();
+	)JS";
+	}
+
+	// 一页的外壳：head + 可选侧栏 + <main>。正文页、目录页、单页共用。
+	static string page_shell(const string& title, const string& toc, const string& body) {
+		std::ostringstream out;
+		out << "<!DOCTYPE html>\n<html lang=\"zh\">\n<head>\n<meta charset=\"utf-8\">\n"
+		    << "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+		    << "<title>" << html_escape(title) << "</title>\n<style>" << css() << "</style>\n"
+		    << "</head>\n<body>\n";
+		if (toc.empty()) {
+			// 没有侧栏的页（单页渲染、目录页）：正文居中，宽度由 main.single 定。
+			out << "<main class=\"page single\">\n" << body << "</main>\n";
+		} else {
+			out << "<div class=\"shell\">\n" << toc << "<main class=\"page\">\n" << body
+			    << "</main>\n</div>\n";
+			// 只有带侧栏的页需要它：恢复目录的滚动位置。
+			out << "<script>\n" << toc_script() << "</script>\n";
+		}
+		out << "</body>\n</html>\n";
+		return out.str();
+	}
+
+~@
+
+<< render_document >>= @
+@after: page-meta
+	// 整份文档：按 nodes 的顺序走，散文、代码块、待办各走各的渲染。
+	// 侧栏与底部导航由调用方给——这里只负责正文，不猜站点长什么样。
+	string render_document(const Document& doc, const string& file, const string& title,
+	                       const string& toc, const string& pager) {
+		std::map<size_t, size_t> seq = product_order(doc, file);
+		std::ostringstream body;
+		for (const auto& n : doc.nodes) {
+			if (n.kind == NodeKind::Prose) {
+				body << render_prose(n.lines);
+			} else if (n.kind == NodeKind::Code) {
+				auto at = seq.find(n.chunk_at);
+				body << render_chunk(doc.chunks[n.chunk_at], at == seq.end() ? 0 : at->second);
+			} else {
+				// 待办去掉 "@todo:" 前缀再渲染，标题由 CSS 里的 TODO 承担。
+				string text = n.lines.empty() ? string() : trim(n.lines[0]);
+				if (has_prefix(text, "@todo:")) text = trim(text.substr(6));
+				body << "<aside class=\"todo\"><b>TODO</b> " << render_inline_prose(text) << "</aside>\n";
+			}
+		}
+		std::ostringstream inner;
+		inner << "<article class=\"doc\">\n" << body.str() << "</article>\n";
+		if (!pager.empty()) inner << pager;
+		return page_shell(title, toc, inner.str());
+	}
+
+~@
+
+## 八、每篇的身份：URL、标题、所属目录
+
+URL 从文件名来，但去掉开头的序号：`1-syntax.nw` → `syntax.html`。序号是给 `sort` 用的，不该出现在地址里——地址是给人念的。
+
+标题取正文里第一个一级标题。取不到就退回文件名：宁可显示 `construct.nw`，也不要一页没有标题。
+
+所属目录取父目录名，并翻成中文：`Chapter 2` → `第 2 章`，`Appendix A` → `附录 A`。`book/menu.nw` 没有父目录，它属于开头那一类，不归任何章。
+
+<< page-meta >>= @
+	// 文件名 → URL：去掉目录、去掉扩展名、去掉开头的序号（1-syntax → syntax）。
+	static string slug(const string& path) {
+		string base = path.substr(path.find_last_of('/') + 1);
+		size_t dot = base.rfind('.');
+		if (dot != string::npos) base = base.substr(0, dot);
+		size_t i = 0;
+		while (i < base.size() && std::isdigit(static_cast<unsigned char>(base[i]))) ++i;
+		if (i > 0 && i < base.size() && base[i] == '-') return base.substr(i + 1);
+		return base;
+	}
+
+	// 标题取正文里第一个一级标题；取不到就退回文件名。
+	string page_title(const Document& doc, const string& path) {
+		for (const auto& n : doc.nodes) {
+			if (n.kind != NodeKind::Prose) continue;
+			// 散文里留着空行，所以跳过它们再找第一行。
+			for (const auto& ln : n.lines) {
+				if (ln.empty()) continue;
+				if (ln.size() > 2 && ln[0] == '#' && ln[1] == ' ') return trim(ln.substr(2));
+				return path;   // 只认第一段散文的第一个非空行
+			}
+			break;
+		}
+		return path;
+	}
+
+	// 父目录名 → 章节名：Chapter 2 → 第 2 章，Appendix A → 附录 A。
+	static string group_label(const string& path) {
+		size_t a = path.find('/');
+		if (a == string::npos) return "";
+		size_t b = path.find('/', a + 1);
+		if (b == string::npos) return "";
+		string dir = path.substr(a + 1, b - a - 1);
+		if (has_prefix(dir, "Chapter ")) return "第 " + dir.substr(8) + " 章";
+		if (has_prefix(dir, "Appendix ")) return "附录 " + dir.substr(9);
+		return dir;
+	}
+
+~@
+
+`std::ostringstream` 是"往字符串里写"的流：用法和 `cout` 完全一样，最后 `out.str()` 一次取走。拼大段文本时比 `+` 快，也不用操心类型转换。
+
+`rfind('.')` 从右往左找最后一个点，`substr(dot + 1)` 取它后面的部分——就是后缀。`string::npos` 是"没找到"的返回值，它不是合法的下标，所以要先判一下。
+
+
+~@
+
+一页能渲染了，每篇的身份也定得下来。下一篇把许多页排成一本书。

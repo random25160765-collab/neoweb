@@ -1,0 +1,1247 @@
+# 编辑器插件
+
+书能生成了，但读者是在编辑器里读它——所以还得管一件很具体的事：这份源在编辑器里长什么样。读者与这本书的第一次接触，不是 tangle、也不是 weave，而是在文件栏里点开一个 `.nw` 文件。
+
+规范不能只靠人记住。`.nw` 在编辑器里如果是一团白字，这套语法第一天就会被劝退——所以插件是项目的一部分：它负责让这份源**读得下去**，顺便替人少敲几个字的模板。
+
+它的职责边界写在这里，免得以后膨胀：只看不动——着色、语言配置、片段、图标。不做 tangle、不做跳转、不做预览。那些要等处理器稳定下来，让编辑器去调处理器，而不是在插件里重写一遍语义。
+
+插件源码和项目其余部分一样是 `.nw`。本文件展开出十一件东西：清单、语言配置、片段、注入语法、语法生成器、解析层、渲染层、装配脚本、调试命令、两个图标。图标也是产物——它们是会随主题改变的文字形状，不是二进制素材，所以同样由这份源生成。
+
+这一章写十一个产物，一个产物一个命名空间块，块头只写裸名：
+
+```nw
+tangle/editor/package.json @
+
+<< manifest >>= @
+	{ … }
+~@
+
+~@
+```
+
+块的全名是「命名空间 + 名字」，所以 `manifest` 在 `tangle/editor/package.json` 里的全名是 `tangle/editor/package.json: manifest`，别的产物要引用它得写全名。
+
+这些产物是 JSON、JS、SVG，里面没有语言的命名空间可开——所以这里的 `路径 @` 只回答一件事：**这一块落在哪个文件**。
+
+## 一、清单
+
+`package.json` 里每一项都有理由，逐条说：
+
+`engines` 写 `^1.80.0`，因为用到了 `contributes.languages.icon`（文件栏图标）——更老的版本会静默忽略它，作者会以为图标写错了。
+
+`grammars` 里第一条挂主语法，第二条是注入语法。注入不是常驻的：它只在特定的作用域里生效，所以单列一条贡献项。
+
+**故意没有 `embeddedLanguages`。** 它只管"这段代码算哪个语言"的少数功能归属（比如按 C 的规则自动缩进、括号匹配），不管颜色——颜色是第六章那两层的事。为它抄一份三十四项的表，等于把解析层那张后缀表复制一遍，正是这个项目要收的税。等真的需要再加。
+
+`configurationDefaults` 给 `.nw` 单独设了三项：自动换行（中文长句必需）、tab 宽 4、**用 tab 缩进**——因为 chunk 体内那一级缩进就是 tab，改用空格会让同一文件里两种缩进混用。
+
+同一处还钉了两族 scope 的颜色（`editor.tokenColorCustomizations` 的默认值）：
+
+- `keyword.control.chunk.*` → 深紫：命名空间行尾的 `@` 与块收尾 `~@` 落在这族里；块头的 `@` 不在这族，跟着主题走。为什么只钉边界、不钉句号，见 5.2。
+- `punctuation.definition.chunk` → 蓝：`<<` 与 `>>` 两处都是它，块头和引用一样。交给编辑器当"括号"去轮换颜色是不行的（会随嵌套换色、还会画竖线导引），钉成一个色才整齐。
+
+`dependencies` 有三条，全是第六章那两个模块要的：`vscode-textmate`（微软那个 TextMate 解释器）、`vscode-oniguruma`（它要的正则引擎，附一份 wasm）、`tm-grammars`（现成的语法集）。主语法层一个都不需要——所以 `make deps` 是单独一步，不进 `all`。
+
+图标分深浅两档：浅色档用暖色实心块 + 冷灰线，深色档把两者都提亮。图案是"两行散文 + 一块代码"，不用尖括号——尖括号会跟 HTML 的图标撞。
+
+tangle/editor/package.json @
+
+<< manifest >>= @
+@long
+	{
+	  "//": "由 editor/plugin.nw 生成，请勿手改",
+	  "name": "nw",
+	  "displayName": "Neoweb (.nw)",
+	  "description": "文学化编程文件 .nw：chunk 定义与引用着色、chunk 体按产物后缀着色、@todo 标记、片段模板。",
+	  "version": "0.1.1",
+	  "publisher": "neoweb",
+	  "license": "MIT",
+	  "main": "./extension.js",
+	  "activationEvents": [
+	    "onLanguage:nw"
+	  ],
+	  "engines": {
+	    "vscode": "^1.80.0"
+	  },
+	  "categories": [
+	    "Programming Languages"
+	  ],
+	  "contributes": {
+	    "languages": [
+	      {
+	        "id": "nw",
+	        "aliases": [
+	          "Neoweb",
+	          "nw"
+	        ],
+	        "extensions": [
+	          ".nw"
+	        ],
+	        "configuration": "./language-configuration.json",
+	        "icon": {
+	          "light": "./icons/nw.svg",
+	          "dark": "./icons/nw-dark.svg"
+	        }
+	      }
+	    ],
+	    "grammars": [
+	      {
+	        "language": "nw",
+	        "scopeName": "source.nw",
+	        "path": "./syntaxes/nw.tmLanguage.json"
+	      },
+	      {
+	        "scopeName": "nw.injection",
+	        "path": "./syntaxes/nw-injection.tmLanguage.json",
+	        "injectTo": [
+	          "source.nw"
+	        ],
+	        "injectionSelector": "L:meta.embedded.block"
+	      }
+	    ],
+	    "snippets": [
+	      {
+	        "language": "nw",
+	        "path": "./snippets/nw.json"
+	      }
+	    ],
+	    "commands": [
+	      {
+	        "command": "nw.enter",
+	        "title": "Neoweb: 换行（块头之后自动补一行 ~@）"
+	      }
+	    ],
+	    "keybindings": [
+	      {
+	        "command": "nw.enter",
+	        "key": "enter",
+	        "when": "editorTextFocus && editorLangId == nw && !suggestWidgetVisible && !editorReadonly"
+	      }
+	    ],
+	    "configurationDefaults": {
+	      "[nw]": {
+	        "editor.wordWrap": "on",
+	        "editor.tabSize": 4,
+	        "editor.insertSpaces": false
+	      },
+	      "editor.tokenColorCustomizations": {
+	        "textMateRules": [
+	          {
+	            "scope": "keyword.control.chunk",
+	            "settings": { "foreground": "#8B5CF6" }
+	          },
+	          {
+	            "scope": "punctuation.definition.chunk",
+	            "settings": { "foreground": "#569CD6" }
+	          }
+	        ]
+	      }
+	    }
+	  },
+	  "dependencies": {
+	    "tm-grammars": "^1.32.22",
+	    "vscode-oniguruma": "^2.0.1",
+	    "vscode-textmate": "^9.3.2"
+	  }
+	}
+~@
+
+~@
+
+## 二、语言配置
+
+`wordPattern` 里把 `<<...>>` 放在最前面，是为了双击就能选中整个 chunk 名——不然双击只选中 `merge`，要手动补 `<<`。
+
+`brackets` 只声明**真正的编程括号**，故意不写 `<<`/`>>`。写了的话会被编辑器的"括号对着色"接管：`<<` 随嵌套深度换色（蓝/金/粉），还会从 `<<` 画一条竖线到 `>>`，把结构标记画成代码里的括号。它自己的颜色由插件默认值钉死（`punctuation.definition.chunk` → 蓝），一处写、到处一样。代价是丢掉 `<<`/`>>` 的配对跳转；选中整个 chunk 名靠 `wordPattern`，成对插入靠 `surroundingPairs`，这两样都还在。
+
+`autoClosingPairs` 里**故意不写** `<<`/`>>`：写 C 的时候 `a << b` 会被自动补成 `a << b >>`，比不补更烦人。括号配对和自动补全是两件事，前者只管高亮，后者会改文本。
+
+tangle/editor/language-configuration.json @
+
+<< language config >>= @
+@long
+	{
+	  "//": "由 editor/plugin.nw 生成，请勿手改",
+	  "wordPattern": "(<<[^<>\\n]+>>)|([\\w\\u4e00-\\u9fa5]+)",
+	  "brackets": [
+	    [
+	      "{",
+	      "}"
+	    ],
+	    [
+	      "[",
+	      "]"
+	    ],
+	    [
+	      "(",
+	      ")"
+	    ]
+	  ],
+	  "autoClosingPairs": [
+	    {
+	      "open": "`",
+	      "close": "`"
+	    },
+	    {
+	      "open": "\"",
+	      "close": "\""
+	    },
+	    {
+	      "open": "'",
+	      "close": "'"
+	    },
+	    {
+	      "open": "(",
+	      "close": ")"
+	    },
+	    {
+	      "open": "[",
+	      "close": "]"
+	    },
+	    {
+	      "open": "{",
+	      "close": "}"
+	    }
+	  ],
+	  "surroundingPairs": [
+	    [
+	      "<<",
+	      ">>"
+	    ],
+	    [
+	      "`",
+	      "`"
+	    ],
+	    [
+	      "\"",
+	      "\""
+	    ],
+	    [
+	      "'",
+	      "'"
+	    ],
+	    [
+	      "(",
+	      ")"
+	    ],
+	    [
+	      "[",
+	      "]"
+	    ],
+	    [
+	      "{",
+	      "}"
+	    ]
+	  ],
+	  "folding": {
+	    "markers": {
+	      "start": "^(\\s*)(<<[^>]*>>\\s*=\\s*@|[A-Za-z0-9._/~+-]+\\s+@)\\s*$",
+	      "end": "^(\\s*)(~@)\\s*$"
+	    }
+	  }
+	}
+~@
+
+~@
+
+## 三、片段
+
+语法里有四样东西要手写，而且每次都要记：落盘 chunk 的头、纯片段的头、引用、待办。四个模板对应它们。
+
+chunk 体的模板自带一个 tab 缩进，因为规范要求体内缩进一级——模板跟着规范走，作者就不会写出两种风格的 chunk。
+
+`@todo:` 顶格，不带缩进：它是正文里的标记，不是代码。
+
+tangle/editor/snippets/nw.json @
+
+<< snippets >>= @
+	{
+	  "//": "由 editor/plugin.nw 生成，请勿手改",
+	  "chunk": {
+	    "prefix": "chunk",
+	    "body": [
+	      "<<${1:sort.c}: ${2:name}>>= @",
+	      "\t$0",
+	      "~@"
+	    ],
+	    "description": "落盘 chunk：<<路径: 名字>>= @ + 缩进一级的代码 + 顶格 ~@"
+	  },
+	  "fragment": {
+	    "prefix": "fragment",
+	    "body": [
+	      "<<${1:name}>>= @",
+	      "\t$0",
+	      "~@"
+	    ],
+	    "description": "纯片段：不落盘，只能被引用"
+	  },
+	  "ref": {
+	    "prefix": "ref",
+	    "body": [
+	      "<<${1:name}>>"
+	    ],
+	    "description": "引用一个纯片段"
+	  },
+	  "todo": {
+	    "prefix": "todo",
+	    "body": [
+	      "@todo: $0"
+	    ],
+	    "description": "未完成论证标记"
+	  }
+	}
+~@
+
+~@
+
+## 四、注入语法
+
+chunk 体内的代码交给宿主语言的语法去着色，于是 `<<print_result>>` 这种引用行会被 C 语法当成两个小于号加标识符。注入语法把它抢回来：只在 `meta.embedded.block` 范围里生效，只认整行引用。
+
+选择器写 `L:` 前缀，意思是"在这个作用域及其子作用域里注入"。
+
+tangle/editor/syntaxes/nw-injection.tmLanguage.json @
+
+<< injection grammar >>= @
+	{
+	  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	  "name": "Neoweb Injection",
+	  "scopeName": "nw.injection",
+	  "//": "宿主语言（C++ 的 namespace、Python 的三引号…）会开自己的区域，把块头和 ~@ 一起吞进去。",
+	  "//2": "块级规则在里面看不见，只有注入能穿透。所以这三条必须留在这里。",
+	  "injectionSelector": "L:meta.embedded.block",
+	  "patterns": [
+	    {
+	      "comment": "嵌套的块头：<< 路径: 名字 >>= @",
+	      "match": "^([ \\t]*)(<<)(?:([^<>\\n:]*?)(?<!:)(:)(?!:))?([^<>\\n]*?)(>>)(=)([ \\t]*)(@)([ \\t]*)$",
+	      "captures": {
+	        "2": { "name": "punctuation.definition.chunk.begin.nw" },
+	        "3": { "name": "string.unquoted.path.nw" },
+	        "4": { "name": "punctuation.separator.key-value.nw" },
+	        "5": { "name": "entity.name.function.chunk.nw" },
+	        "6": { "name": "punctuation.definition.chunk.end.nw" },
+	        "7": { "name": "keyword.operator.assignment.nw" },
+	        "9": { "name": "keyword.control.head-marker.nw" }
+	      }
+	    },
+	    {
+	      "comment": "嵌套块的收尾：~@",
+	      "match": "^([ \\t]*)(~@)([ \\t]*)$",
+	      "captures": { "2": { "name": "keyword.control.chunk.terminator.nw" } }
+	    },
+	    {
+	      "comment": "整行的 chunk 引用，要从宿主语言里抢一行",
+	      "match": "^([ \\t]*)(<<)([^<>\\n]+?)(>>)([ \\t]*)$",
+	      "captures": {
+	        "2": { "name": "punctuation.definition.chunk.begin.nw" },
+	        "3": { "name": "entity.name.function.chunk.nw" },
+	        "4": { "name": "punctuation.definition.chunk.end.nw" }
+	      }
+	    }
+	  ]
+	}
+~@
+
+~@
+
+## 五、语法生成器：结构规则的唯一出处
+
+`nw.tmLanguage.json` 是生成的，不由人手写：`plugin.nw` tangle 出 `gen-grammar.js`，它再写出那份 JSON。两个理由：
+
+1. **捕获组按序号编号。** 块头正则里有七个括号，哪个是 `<<`、哪个是名字，全靠 `captures` 里的数字。手写 JSON 时改正则就得重数一遍，错一个数字不会报错，只会把名字染成标点。把这些编号写成一张表，改正则和改名字就在同一处。
+2. **产物要能进 `make verify`。** JSON 由脚本从源码算出来，就永远和书一致；手写的那份迟早是"某次改了源码忘了改产物"。
+
+**语言不在这里。** 这一层只认四类行：命名空间、块头、引用、终止符。理由很硬：C++ 的 `namespace nw {` 会一直开到某个 `}`，区域一开，我们的 `~@` 就落在别人的区域里，TextMate 没有"这不合法、退回上一层"的纠错——一个没闭合的区域能把后面整章正文都吃成 C++。所以块体里的代码不交给主语法，交给第六章那个自己的解析层：它知道块在哪里结束，因为它自己数块头。
+
+生成时有一处容易踩：**`end` 要按"整行就是终止符"来写。** 终止符是 `~@`，正则用 `^…$` 钉在整行上——写宽了，字符串里出现的一小段也会被当成收尾。
+
+最后一条兜底是把内置的 Markdown 语法挂在末尾：正文、标题、列表、示例围栏全交给它，插件只管 chunk 那几行。围栏也顺带解决了——围栏里的示例不是 chunk，Markdown 的区域一开，我们的块规则就看不见那几行。
+
+### 5.1 文件头
+
+生成器要的东西很少：`fs` 与 `path`，外加"写到哪里"。**语言的对应表不在这里**（见 6.1）——结构规则不需要它，把它留在这层只会是一份没人读的死数据。
+
+tangle/editor/tools/gen-grammar.js @
+
+<< gen-head >>= @
+	// 由 editor/plugin.nw 生成，请勿手改。
+	//
+	// 生成 syntaxes/nw.tmLanguage.json。
+	// 这一层只认结构：命名空间、块头、引用、终止符。语言不在语法里，
+	// 因为语言语法开的区域会吞掉 ~@，把后面整章正文吃成那种语言（见第六章）。
+	//
+	// 用法: node editor/tools/gen-grammar.js
+
+	const fs = require("fs");
+	const path = require("path");
+~@
+
+### 5.2 每条规则共用的两段
+
+chunk 头的正则里有十个捕获组（多出来的是路径、冒号与尾随空白），每条规则都要对它们上色；收尾的 `@` 也是每条规则都一样。这两段各抽一个对象，用 `...` 展开进每条规则——**改一处，全表跟着改**。
+
+`...` 是 JavaScript 的展开运算符：把一个对象的键值原样铺进另一个对象。这里它替代了"复制粘贴十行捕获组"。
+
+<< head-captures >>= @
+@long
+	// 命名空间的开层 `名字 @`：1 空白 | 2 路径 | 3 空白 | 4 @
+	// 那个 @ 落在 keyword.control.chunk.* 族里：它是段落边界，插件把这一族钉成深紫。
+	// 但不能复用块收尾的 scope——解析层找收尾时靠的正是那个名字，命名空间行会被误当成 ~@。
+	const nsCaptures = {
+	  2: { name: "string.unquoted.path.nw" },
+	  4: { name: "keyword.control.chunk.namespace.nw" }
+	};
+
+	// 块头 `<< 路径: 名字 >>= @`：1 空白 | 2 << | 3 路径 | 4 : | 5 名字 | 6 >> | 7 = | 8 空白 | 9 @ | 10 尾随
+	// 路径与名字分开上色：路径是"落到哪个文件"，名字是"这一段叫什么"，两者读者要分开扫。
+	// 3、4 在纯片段（没有冒号）时整组不参与匹配，捕获不到就自然不着色。
+	const headCaptures = {
+	  2: { name: "punctuation.definition.chunk.begin.nw" },
+	  3: { name: "string.unquoted.path.nw" },
+	  4: { name: "punctuation.separator.key-value.nw" },
+	  5: { name: "entity.name.function.chunk.nw" },
+	  6: { name: "punctuation.definition.chunk.end.nw" },
+	  7: { name: "keyword.operator.assignment.nw" },
+	  9: { name: "keyword.control.head-marker.nw" }
+	};
+
+	// 引用 `<< 名字 >>`：与块头同一套，只有 = 与 @ 的差别
+	const refCaptures = {
+	  2: { name: "punctuation.definition.chunk.begin.nw" },
+	  3: { name: "entity.name.function.chunk.nw" },
+	  4: { name: "punctuation.definition.chunk.end.nw" }
+	};
+
+	// 块收尾 `~@`。注意它跟块头的 @ 不是同一个 scope：那个走 keyword.control.head-marker。
+	// 块体只认顶格一个 `~@`——tangle 就是这么判的，后头跟名字不算收尾。
+	const CHUNK_END = {
+	  end: `^(\\s*)(~@)(\\s*)$`,
+	  endCaptures: { 2: { name: "keyword.control.chunk.terminator.nw" } }
+	};
+
+	// 记号只有两种形状：开层 `名字 @`、收层 `~@`（可跟名字核对）。
+	// **整行只许有记号**——这条由 NS_TAIL 这个预查表达，它是"与缩进、换行无关"的另一半：
+	// 没有它，「见 src @ 那一节」这种散文也会被当成开层。
+	const NS_NAME = `[A-Za-z0-9._/~+-]+`;
+	const NS_TAIL = `(?=(?:[ \\t]*(?:(?:~@(?:[ \\t]+\\S+)?)|(?:${NS_NAME}[ \\t]+@)))*[ \\t]*$)`;
+
+	// 命名空间的收尾可以跟名字核对（`~@ weave.cpp`），只写最后一段也算对上。
+	// 不必独占一行：`~@~@~@` 连写三个就是连着关三层，`~@ weave ~@ src` 一样。
+	// 前头那几个空白要吃掉：不吃的话 Markdown 的段落规则会比下一个记号更早命中，把一行劈成两半。
+	const NS_END = {
+	  end: `([ \\t]*)(~@)(?:[ \\t]+(\\S+))?` + NS_TAIL,
+	  endCaptures: {
+	    2: { name: "keyword.control.chunk.terminator.nw" },
+	    3: { name: "entity.name.function.chunk.nw" }
+	  }
+	};
+~@
+
+三个 `@` 分两档颜色。第一档是**命名空间行尾的 `@` 和块收尾 `~@`**：它们在 `keyword.control.chunk.*` 这一族里，插件在清单里把这一族钉成深紫（`editor.tokenColorCustomizations` 的默认值，选择器写 `keyword.control.chunk`，前缀匹配，一条规则盖住整族，颜色 `#8B5CF6`）。第二档是**块头的 `@`**：它叫 `keyword.control.head-marker.nw`，**故意不在这族里**，所以它跟着主题走——默认深色主题下是紫粉，和 `if`、`return` 同一档。
+
+`~@` 的颜色不看它长什么样，看它收的是什么：收块、收命名空间都由某个区域的 `end` 捕获，一律深紫；没开过任何区域的 `~@` 压根没有 scope，落在语法兜底（Markdown）里就是白字。白字不是漏掉，而是信息——那个位置什么也没开。
+
+两者的收尾不是同一条正则：命名空间可以跟名字核对（`~@ weave.cpp`），块不行——块体只认顶格一个 `~@`，tangle 是这么判的，语法也照抄。
+
+为什么块头要单独一档？因为 `<< 名字 >>= @` 是一个整体：`@` 是这句话的句号，读的时候跟 `>>=` 连着扫过去；而 `~@` 和 `tangle/parse.cpp @` 是**段落边界**，扫视时先找它们。深紫让边界跳出来，粉色让句号留在句子里。
+
+三个名字互不相同还有个硬理由：解析层靠 `keyword.control.chunk.terminator.nw` 精确认出块收尾，靠 `punctuation.definition.chunk.begin.nw` 认块头。命名空间那个 `@` 要是也叫 terminator，每个命名空间行都会被当成 `~@`，深度计数就散了。
+
+用户自己写过 `tokenColorCustomizations` 的话，这份默认值会被整份替换，两个边界标记就退回主题的颜色——那是设置项的规则，不是我们的选择。
+
+### 5.3 结构规则：只有三类行
+
+三条区域规则（命名空间、块、嵌套块）加一条行规则（引用），这就是整份语法。没有"游离终止符"这一条：`~@` 只作为区域的结束存在——收块一条、收命名空间一条，两条都带 scope；没开过任何区域的那个才什么都没有。
+
+引用规则要挂两处：顶层一份，`chunk` 与 `sub-chunk` 的 `patterns` 里各一份。区域一开顶层规则就失效，而块体里的整行引用恰恰是最常见的——不挂的话，`<< parser-namespace >>` 会被宿主语言当成移位表达式，`-` 上色成运算符。
+
+一行可以排几个引用，用 `|` 隔开（`<< a >> | << b >>`）：`|` 只是分隔符，与分三行写等价，解析层的 `normalize_refs` 就是这么判的。这条规则得跟着认这种写法，否则整行会掉进宿主语言里——`<<`、`>>` 变成移位运算符，`|` 变成按位或，名字变成变量。锚点因此不能写成"整行一个引用"：改成"前面是行首或 `|`、后面是 `|` 或行尾"，一段一段地匹配，几个引用就各自上色。前后都要求是引用：`|` 两边必须各是 `<<…>>`，所以 C++ 里的 `x << y | z` 不会被误认（前面既不是行首也不是 `|`），正文里 `<< a >> | 一些字` 也不会被当成一行引用。
+
+那些 `scope` 名字是这一层与第六章之间**唯一的接口**：解析层靠 `punctuation.definition.chunk.begin.nw`、`keyword.control.chunk.terminator.nw`、`string.unquoted.path.nw` 三个名字认出块头、收尾、产物路径。名字改一处，两边一起改——但它们必须写在这儿，因为语法层才是结构的定义。
+
+命名空间那一族记号也不认"一行一个"：`src @ weave @ markdown.cpp @` 是三层，`~@~@~@` 是连关三层，`~@ markdown.cpp ~@ weave ~@ src` 是带名字核对地关。判据与解析层的 `read_namespace` 一样——**整行除了记号不许有别的东西**——所以那几条规则的尾巴都挂一个预查，把"行尾之前只剩记号"写死。少了它，「见 src @ 那一节」这种散文会被开成一层，后面整篇的结构跟着错位。开层规则的锚点也因此不能写行首：第二层以后都落在行的中间，只能靠"记号前面不是别的东西"这个更弱的条件。两个细节是踩出来的：开层与收尾都要吃掉前头的空白，否则 Markdown 的段落规则会比下一个记号更早命中，一行被劈成"第一个记号 + 一大段散文"。
+
+<< structure >>= @
+@long
+	// **语法这一层只认结构，不含任何语言。**
+	//
+	// 语言语法会开自己的区域（C++ 的 `namespace nw {` 一直到 `}`），区域一开，
+	// 我们的块头与 `~@` 就看不见了——TextMate 没有"这不合法，退回上一层"的纠错。
+	// 所以块体不在这里着色，交给第六章的解析层（它自己数块头，所以知道块在哪结束）。
+	//
+	// 这里只留三类区域：命名空间、块、嵌套块，再加一条行规则（引用）。
+	// `~@` 从不单列——它只作为区域的结束存在：收块的有 #chunk 的 end，收命名空间的有
+	// #namespace 的 end，两边都带 scope；没开过任何区域的 `~@` 才真的没有 scope（白字）。
+	// 没有语言参与，也就没有东西能挡住 `~@`。
+	const repository = {};
+	// 路径段是可选的：`<< 路径: 名字 >>` 才拆。冒号必须是单个——`::` 是块树分级，属于名字，
+	// 所以两头都加了断言；不符合时整组放弃，名字把冒号一起吃掉。
+	const headRegex = `^(\\s*)(<<)(?:([^<>\\n:]*?)(?<!:)(:)(?!:))?([^<>\\n]*?)(>>)(=)([ \\t]*)(@)(\\s*)$`;
+	// 开层不锚行首：一行里可以开好几层（`src @ weave @ markdown.cpp @`），后几层落在行中间。
+	// 「整行只许有记号」由 NS_TAIL 保证，所以不锚也不会把「见 src @ 那一节」认成开层。
+	// 前头的空白也要吃掉：否则 Markdown 的段落规则会比这一层的第二个记号更早命中，
+	// 一行就会被劈成"第一个记号 + 一大段散文"。
+	const nsBegin = `([ \\t]*)(${NS_NAME})([ \\t]+)(@)` + NS_TAIL;
+
+	// 命名空间也是区域：`路径 @` 开、`~@` 收。它里面还能再开命名空间与块，所以自己也 include 自己。
+	// 一层一个区域：`~@` 挨个收，收几个就弹几个——所以 `~@~@~@` 与分三行写结果一样。
+	// 兜底必须带上 Markdown，否则"命名空间里那一大段散文"会整段掉色。
+	repository["namespace"] = {
+	  comment: "命名空间：`名字 @` 到 `~@`；一行可以开好几层，也可以连着关",
+	  begin: nsBegin,
+	  beginCaptures: nsCaptures,
+	  ...NS_END,
+	  patterns: [
+	    { include: "#namespace" },
+	    { include: "#chunk" },
+	    { include: "#ref" },
+	    { include: "#directive" },
+	    { include: "#todo" },
+	    { include: "text.html.markdown" }
+	  ]
+	};
+
+	repository["sub-chunk"] = {
+	  comment: "嵌套块：只认块头与收尾，内容不归这一层管",
+	  begin: headRegex,
+	  beginCaptures: headCaptures,
+	  ...CHUNK_END,
+	  patterns: [{ include: "#ref" }, { include: "#directive" }, { include: "#todo" }]
+	};
+	repository["chunk"] = {
+	  comment: "块：块头到 ~@，体内可以再有一个嵌套块",
+	  begin: headRegex,
+	  beginCaptures: headCaptures,
+	  ...CHUNK_END,
+	  // 引用、修饰符、待办标记都是块体里的结构行：区域一开顶层规则就失效，必须在这里再挂一次。
+	  // 少了 #ref 的后果很具体：`<< parser-namespace >>` 会被当成 C++ 的移位，`-` 上色成运算符。
+	  patterns: [{ include: "#ref" }, { include: "#directive" }, { include: "#todo" }, { include: "#sub-chunk" }]
+	};
+
+	// 引用也进 repository：命名空间区域里要能用，否则"命名空间里的正文"就只剩 Markdown。
+	// 一行可以排几个，用 `|` 隔开：`|` 不捕获，它就是分隔符（与分行写等价）。
+	// 预查两头都要求行首/`|` 与 `|`/行尾，一段一段地匹配——一行五个引用就上五次色。
+	repository["ref"] = {
+	  comment: "引用：`<< 名字 >>`（与块头同名同色，只差 = 与 @）；一行可排几个，用 `|` 隔开",
+	  match: `(?:^|\\|)([ \\t]*)(<<)([^<>\\n]+?)(>>)(?=[ \\t]*(?:\\|(?=[ \\t]*(?:<<|$))|$))`,
+	  captures: refCaptures
+	};
+
+	const structureRules = [
+	  { include: "#namespace" },
+	  { include: "#chunk" },
+	  { include: "#ref" }
+	];
+~@
+
+### 5.4 两条兜底规则
+
+结构之外还有两类行要认：块级修饰符（`@after:` / `@before:`）和待办标记（`@todo:`）。它们的颜色不靠语言，靠约定，所以排在结构规则后面。
+
+两条都要挂两份：顶层一份（正文里的孤立行），`chunk` 与 `sub-chunk` 的 `patterns` 里各一份（块体的头几行）。区域一开，顶层规则就看不见区域内的一行——只挂顶层的话，`@after:` 在块里就是白字，还会被解析层当成 C 代码去读。
+
+最后一条 `include: text.html.markdown` 必须垫底——它是"其余一切"。
+
+<< extra-rules >>= @
+// 这两条要挂两处：顶层（正文里的孤立行）与区域里（块体的头几行）。
+// 区域一旦打开，顶层规则就看不见区域内的一行，所以 repository 里也必须有一份。
+const directiveRule = {
+  comment: "块级修饰符 @after: / @before:",
+  match: "^(\\s*)(@)(after|before)(:)([^\\n]*)$",
+  captures: {
+    2: { name: "keyword.control.directive.nw" },
+    3: { name: "keyword.control.directive.nw" },
+    4: { name: "punctuation.separator.key-value.nw" },
+    5: { name: "entity.name.function.chunk.nw" }
+  }
+};
+
+const todoRule = {
+  comment: "未完成标记 @todo: …",
+  match: "^(\\s*)(@todo)(:)([^\\n]*)$",
+  captures: {
+    2: { name: "keyword.control.todo.nw" },
+    3: { name: "punctuation.separator.key-value.nw" },
+    4: { name: "markup.other.todo-text.nw" }
+  }
+};
+
+repository["directive"] = directiveRule;
+repository["todo"] = todoRule;
+
+const fallbackRules = [directiveRule, todoRule];
+~@
+
+### 5.5 组装与写出
+
+语法文件的本体只剩"把两部分拼起来"：结构规则在前，兜底规则在后，Markdown 垫底。
+
+`JSON.stringify(grammar, null, 2)` 的第二个参数是"替换函数"（这里不用），第三个是缩进宽度。写文件时补一个换行——**产物也要像源码**，否则每次 `git diff` 都在末行报警。
+
+<< grammar >>= @
+	const grammar = {
+	  $schema: "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	  name: "Neoweb",
+	  scopeName: "source.nw",
+	  // 先认结构，剩下的交给 Markdown。块体的颜色由第六章的解析层负责。
+	  patterns: [...structureRules, ...fallbackRules, { include: "text.html.markdown" }],
+	  repository
+	};
+
+	const out = path.join(__dirname, "..", "syntaxes", "nw.tmLanguage.json");
+	fs.writeFileSync(out, JSON.stringify(grammar, null, 2) + "\n");
+	console.log(`写出 ${out}（结构规则 ${structureRules.length} 条）`);
+~@
+
+~@
+
+## 六、两层着色：结构归语法，颜色归主题
+
+第五章那份主语法只认结构：块头、引用、`~@`、命名空间。块体里的代码在编辑器眼里是白字——因为那块文字用什么语言读，取决于产物路径的后缀，而 TextMate 没法在匹配的时候"看后缀再换语法"。
+
+为什么不干脆把 `source.cpp` 写进块规则里？因为区域会打架：C++ 的 `namespace nw {` 一开，就开到某个 `}` 为止，而那个 `}` 常在块体外面。区域一开，我们的 `~@` 就落在别人的区域里，TextMate 没有"这不合法、退回上一层"的纠错——一个没闭合的区域能把后面整章正文都吃成 C++。**能决定块在哪里结束的，只有知道块结构的那一层**，所以块体的 token 由插件自己算。
+
+算 token 有两种做法，只有一种是对的：
+
+- 自己写正则认关键字、字符串、数字、注释，再配一套自选的颜色。这是错的，错两处：语言没有穷尽，正则一定漏；颜色写死在代码里，换个主题别处都变，只有块体不变。
+- 请现成的解释器来读。VS Code 自己用的就是 TextMate：`vscode-textmate` 是微软那个解释器，`vscode-oniguruma` 是它的正则引擎（WebAssembly），`tm-grammars` 是两百多份现成语法。它们只回答"这几个字符是什么"（scope），不回答"该是什么颜色"。
+
+于是这一层拆成三个文件，边界就是三句话：**解析层不认识颜色，渲染层不认识语法，装配层两者都不认识、只管编码和注册。**
+
+### 6.1 解析层：TextMate 读文本，语法文件定 scope
+
+`tokenize.js` 对外只有一个函数：一篇文本 → token 列表。token 是 `{line, start, end, scopes}`，`scopes` 是那串 `source.cpp meta.block.namespace.cpp …`。整份文件里没有一个色值。
+
+textmate 有个小毛病：跨行的注释/字符串收在行尾时，它给的 `endIndex` 会多出一格（空行干脆给 `[0,1]`）。所以这里一律夹到行长，夹成空的不收——不夹的话，交给编辑器的范围会越界。
+
+结构也是它给的，但不靠正则：先请 `source.nw` 把整篇过一遍，看哪一行的 scope 里有 `punctuation.definition.chunk.begin.nw`（块头）、`keyword.control.chunk.terminator.nw`（`~@`）、`string.unquoted.path.nw`（产物路径，命名空间行与块头里都是它）。**结构只写了一遍**，就在那份语法里，这里只是读它。围栏里的示例也顺带不用管了——Markdown 的区域一开，块规则就看不见那几行。
+
+块体的边界由这一层自己数（深度计数），所以块体可以放心交给真语法：`~@` 一到，状态直接扔回 `INITIAL`，这一块里没闭合的区域带不到下一块。
+
+对外只有一个 `tokens()`：结构行不进去，只留块体里的 token。剩下两件事——归类和交给编辑器——是 6.2 与 6.3 的事。
+
+tangle/editor/tokenize.js @
+
+<< tokenize.js >>= @
+
+	// 由 tangle/editor/plugin.nw 生成，请勿手改。
+	// 解析层：把文本变成 token，只回答"这几个字符是什么"，不回答"它是什么颜色"。
+	//
+	// 三样东西都是别人的：vscode-textmate 是微软的 TextMate 解释器（VS Code 自己用的就是它），
+	// vscode-oniguruma 是它的正则引擎（WebAssembly），tm-grammars 是现成的语法集。
+	// 这里没有一行语言规则——C 的关键字、Python 的三引号、Rust 的生命周期都在语法文件里。
+	const fs = require("fs");
+	const path = require("path");
+	const vsctm = require("vscode-textmate");
+	const oniguruma = require("vscode-oniguruma");
+
+	const GRAMMARS = path.join(__dirname, "node_modules", "tm-grammars", "grammars");
+	const OWN = path.join(__dirname, "syntaxes", "nw.tmLanguage.json");
+
+	<< 后缀表 >> | << 语法索引 >> | << 注册表 >> | << 块体缓存 >> | << 切块 >>
+
+~@
+
+后缀表只回答一件事：这个后缀该用哪门语法。右边写的是 `tm-grammars` 里的**文件名**，不是 scopeName——scope 从语法文件里自己读，同一件事不抄两遍。
+
+表里没有的后缀不着色。认不出语言不是错，猜一个语言才是：拿 JSON 的规则去染 TOML，比白着更误导人。
+
+`.cu`、`.cuh` 指向 C++，不指向一门并不存在的 "CUDA 语法"：`tm-grammars` 里没有它，而 CUDA 本来就是 C++ 加几个修饰符，拿 C++ 读只有 `__syncthreads` 这类会落成函数名，结构不会读错。
+
+<< 后缀表 >>= @
+
+	// 产物后缀 → tm-grammars 里的语法文件名（不是 scopeName：scope 从语法文件里读）。
+	// 表里没有的后缀不着色——认不出语言不是错，猜一个语言才是。
+	const BY_SUFFIX = {
+	  c: "c", h: "c",
+	  cc: "cpp", cpp: "cpp", cxx: "cpp", hpp: "cpp", hh: "cpp", inl: "cpp",
+	  cu: "cpp", cuh: "cpp",
+	  rs: "rust",
+	  py: "python",
+	  js: "javascript", mjs: "javascript", cjs: "javascript",
+	  ts: "typescript", tsx: "typescript",
+	  go: "go", java: "java", kt: "kotlin",
+	  sh: "shellscript", bash: "shellscript", zsh: "shellscript",
+	  json: "json", jsonc: "jsonc",
+	  yaml: "yaml", yml: "yaml", toml: "toml",
+	  sql: "sql", lua: "lua", rb: "ruby", php: "php",
+	  html: "html", htm: "html", css: "css", scss: "css",
+	  md: "markdown", tex: "latex",
+	  nix: "nix", zig: "zig", xml: "xml", svg: "xml",
+	  nw: "nw"
+	};
+
+	// 没有后缀的文件只能按文件名认。只写 tm-grammars 里真的有的。
+	const BY_NAME = { Dockerfile: "docker", "CMakeLists.txt": "cmake" };
+
+	function grammarNameOf(which) {
+	  const base = which.split("/").pop();
+	  if (BY_NAME[base]) return BY_NAME[base];
+	  const dot = base.lastIndexOf(".");
+	  if (dot < 0) return null;
+	  return BY_SUFFIX[base.slice(dot + 1)] || null;
+	}
+
+~@
+
+两张索引，两种用途：**文件名 → scopeName** 用来从后缀找到要加载哪门语法；**scopeName → 文件** 用来满足语法之间的 `include`（C++ 的规则里有 `include source.c`，那个名字只有语法自己知道）。
+
+第二张要读两百六十个文件，约 20 毫秒，所以只在第一次碰到不认识的 scope 时才建——顶层语法用文件名就能找到，不必先有它。
+
+<< 语法索引 >>= @
+
+	// 文件名 → scopeName，和 scopeName → 文件。两种索引都要：
+	// 找顶层语法用前者（后缀表给的是文件名），嵌套 include 只有 scope。
+	let byScope = null;
+	const scopeOfName = new Map();
+
+	function readScope(file) {
+	  const hit = /"scopeName"\s*:\s*"([^"]+)"/.exec(fs.readFileSync(file, "utf8"));
+	  return hit ? hit[1] : null;
+	}
+
+	function byScopeIndex() {
+	  if (!byScope) {
+	    byScope = new Map();
+	    for (const name of fs.readdirSync(GRAMMARS)) {
+	      if (!name.endsWith(".json")) continue;
+	      const file = path.join(GRAMMARS, name);
+	      const scope = readScope(file);
+	      if (scope) byScope.set(scope, file);
+	    }
+	  }
+	  return byScope;
+	}
+
+	// 后缀表给的是文件名，这里换成 scopeName；换不出来就没有语法，那一块按纯文本。
+	function scopeOf(name) {
+	  if (!name) return null;
+	  if (name === "nw") return "source.nw";
+	  if (scopeOfName.has(name)) return scopeOfName.get(name);
+	  let scope = null;
+	  const file = path.join(GRAMMARS, name + ".json");
+	  try {
+	    scope = readScope(file);
+	  } catch (e) {
+	    scope = null;
+	  }
+	  scopeOfName.set(name, scope);
+	  return scope;
+	}
+
+~@
+
+注册表只建一次：把 onig.wasm 交给 `vscode-oniguruma`，再把 oniguruma 交给 `vscode-textmate`。之后所有语法共用一个 registry，它自己缓存解析结果。
+
+`loadGrammar` 找不到语法时返回 `null`：textmate 会当作"这一段没有规则"，继续往下走。`tm-grammars` 没收的方言（汇编、GLSL……）因此只是不着色，不是解析失败。
+
+<< 注册表 >>= @
+
+	// 一个 registry 管所有语法：它缓存解析好的语法，也负责处理 include。
+	let booting = null;
+
+	function boot() {
+	  if (!booting) {
+	    booting = (async () => {
+	      const wasm = fs.readFileSync(path.join(__dirname, "node_modules", "vscode-oniguruma", "release", "onig.wasm"));
+	      await oniguruma.loadWASM(wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength));
+	      return new vsctm.Registry({
+	        onigLib: Promise.resolve({
+	          createOnigScanner: (sources) => new oniguruma.OnigScanner(sources),
+	          createOnigString: (text) => new oniguruma.OnigString(text)
+	        }),
+	        // 找不到的语法返回 null：textmate 会当作"这一段没有规则"，继续往下走。
+	        // tm-grammars 没收的方言只是不着色，不是解析失败。
+	        loadGrammar: async (scope) => {
+	          const file = scope === "source.nw" ? OWN : byScopeIndex().get(scope);
+	          if (!file) return null;
+	          return vsctm.parseRawGrammar(fs.readFileSync(file, "utf8"), file);
+	        }
+	      });
+	    })();
+	  }
+	  return booting;
+	}
+
+~@
+
+块体缓存是这个插件唯一的性能手段，理由很直接：一段文本配一门语法，token 必然一样。打字时只有一块在变，其余块直接命中缓存；没有它，每敲一下都要把一整章重新解析一遍（实测约 0.5 秒，每章）。
+
+缓存的键里带上 scope，因为同一段文本在 C++ 和 JSON 下是两个答案。
+
+<< 块体缓存 >>= @
+
+	// 同一段文本 + 同一门语法，token 必然一样。打字时只有一块在变，别的块直接命中。
+	const cache = new Map();
+	const CACHE_MAX = 200;
+
+	function remember(key, value) {
+	  if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
+	  cache.set(key, value);
+	}
+
+	async function tokenizeBody(registry, scope, text) {
+	  const key = scope + "/" + text;
+	  const hit = cache.get(key);
+	  if (hit) return hit;
+	  const grammar = await registry.loadGrammar(scope);
+	  const out = [];
+	  const lines = text.split("\n");
+	  let stack = vsctm.INITIAL;
+	  for (let i = 0; i < lines.length; i += 1) {
+	    const r = grammar.tokenizeLine(lines[i], stack);
+	    stack = r.ruleStack;
+	    for (const t of r.tokens) {
+	      // textmate 对行尾会多算一格（空行甚至给 [0,1]），夹到行长；夹完是空的就丢掉。
+	      const end = t.endIndex > lines[i].length ? lines[i].length : t.endIndex;
+	      if (end <= t.startIndex) continue;
+	      out.push({ line: i, start: t.startIndex, end: end, scopes: t.scopes });
+	    }
+	  }
+	  remember(key, out);
+	  return out;
+	}
+
+~@
+
+切块这件事，一行正则也没有：三个 scope 名字就是和语法层的全部接口。判断顺序必须是"先看块头、再看收尾，最后才看产物路径"：块头那一行里也有路径，先按路径处理的话，块的深度根本不会加。
+
+块头与引用共用 `<<` 的 scope，分不清就会出事：顶格一行 `<< x >>` 是引用，却会被当成开块，后面整段正文都被算成"块体"送去给 C++ 读。所以判据是**有没有 `=`**——有 = 开块，没有 = 引用；引用那一行也不进 token 列表，因为它不是代码（tangle 会把被引的块整个展开到这儿）。
+
+产物路径有两个来源，缺一个就有文件整篇白着：块头里的 `<<路径: 名字>>`，以及命名空间行的 `路径 @`。两处用的是同一个 scope，所以这一层不必再拆冒号——拆分在语法层就做完了（单个冒号是分隔符，`::` 是块树分级、属于名字）。纯片段没有路径，沿用上一个已知的。
+
+<< 切块 >>= @
+@long
+
+	// 结构层留下的三个 scope 只在这里出现一次。
+	const PATH = "string.unquoted.path.nw";
+	const HEAD = "punctuation.definition.chunk.begin.nw";
+	const TERM = "keyword.control.chunk.terminator.nw";
+	// 块头与引用共用 `<<` 的 scope，只能靠有没有 `=` 分清：有 = 是开块，没有是引用。
+	const ASSIGN = "keyword.operator.assignment.nw";
+	// 修饰符与待办标记也不是代码：它们是块体的头几行，但不该交给 C 去读。
+	const META = ["keyword.control.directive.nw", "keyword.control.todo.nw"];
+	const has = (r, name) => r.tokens.some((t) => t.scopes.indexOf(name) >= 0);
+	// 一行可以开好几层命名空间（`src @ weave @ markdown.cpp @`）：最后一段才是落到的产物。
+	const lastPath = (r) => {
+	  let hit = null;
+	  for (const t of r.tokens) if (t.scopes.indexOf(PATH) >= 0) hit = t;
+	  return hit;
+	};
+
+	// 整篇文本 → token 列表（行号、列号都是绝对的）。
+	// 结构问语法要，token 问 textmate 要；这一层没有正则，也没有颜色。
+	async function tokens(text) {
+	  const registry = await boot();
+	  const own = await registry.loadGrammar("source.nw");
+	  const lines = text.split("\n").map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
+	  const out = [];
+	  let stack = vsctm.INITIAL;
+	  let target = null;   // 当前产物路径：块体用哪门语法由它决定
+	  let depth = 0;       // 块嵌套深度：0 就是正文
+	  let from = -1;       // 正在攒的块体起始行
+
+	  const flush = async (to) => {
+	    const begin = from;
+	    if (begin < 0 || to < begin) return;
+	    from = -1;
+	    const scope = scopeOf(grammarNameOf(target || ""));
+	    if (!scope) return;
+	    const body = await tokenizeBody(registry, scope, lines.slice(begin, to + 1).join("\n"));
+	    for (const t of body) {
+	      out.push({ line: begin + t.line, start: t.start, end: t.end, scopes: t.scopes });
+	    }
+	  };
+
+	  for (let i = 0; i < lines.length; i += 1) {
+	    const r = own.tokenizeLine(lines[i], stack);
+	    stack = r.ruleStack;
+	    if (has(r, HEAD) && has(r, ASSIGN)) {
+	      await flush(i - 1);     // 块头自己不是代码
+	      // 路径有两个来源：块头里的 `<<路径: 名字>>`、上一行的命名空间，都是同一个 scope。
+	      const p = lastPath(r);
+	      if (p) target = lines[i].slice(p.startIndex, p.endIndex);
+	      depth += 1;
+	      continue;
+	    }
+	    if (has(r, HEAD)) {
+	      await flush(i - 1);     // 整行的引用也不是代码：tangle 会把被引的那块展开到这儿
+	      continue;
+	    }
+	    if (r.tokens.some((t) => t.scopes.indexOf(TERM) >= 0)) {
+	      await flush(i - 1);     // ~@ 也不在块体里
+	      depth = Math.max(0, depth - 1);
+	      continue;
+	    }
+	    if (r.tokens.some((t) => META.some((s) => t.scopes.indexOf(s) >= 0))) {
+	      await flush(i - 1);     // @after: / @todo: 是结构行，体在它后面继续
+	      continue;
+	    }
+	    if (depth === 0) {
+	      const p = lastPath(r);
+	      if (p) {
+	        await flush(i - 1);
+	        target = lines[i].slice(p.startIndex, p.endIndex);
+	        continue;
+	      }
+	    }
+	    if (depth > 0 && from < 0) from = i;
+	  }
+	  await flush(lines.length - 1);
+	  return out;
+	}
+
+	module.exports = { tokens: tokens };
+
+~@
+
+~@
+
+### 6.2 渲染层：只报类别，颜色在客户端
+
+`classify.js` 只回答一个问题：这个 token 属于哪一类。答案不是颜色，是编辑器词汇表里的一个**语义类型**——`comment`、`string`、`function`、`type`……
+
+颜色的链条在客户端走完：语义类型 → 一组默认 scope → 当前主题的 `tokenColors`。第一跳是编辑器自己定的（`function` → `entity.name.function`，`macro` → `entity.name.function.preprocessor`，`type` → `entity.name.type` 与 `support.type`……），第二跳是主题文件定的。**这两跳一步都不到我们手里**，所以块体的颜色和同一份主题里别处的颜色天然是一套，换主题跟着变，我们一行代码都不用改。
+
+这也是为什么不用装饰器：装饰器的 `color` 要一个具体色值，而色值只能从主题文件里读。扩展跑在**远程**窗口时，主题文件在客户端那台机器上——服务器端的扩展看得见工作区的文件，看不见你的主题。语义 token 没有这个问题：我们只报类别，颜色在渲染进程里算。
+
+一个细节：由内往外找。一个 token 有一串 scope，最里面那个最具体；认不出来就问外面一层。字符串的引号就是这么继承到 `string` 的——`punctuation.definition.string.begin` 自己不映射，落到父 scope `string.quoted.double`。
+
+代价说清楚：语义类型只有二十来个，`constant.language`（`true`、`None`）和 `storage.modifier`（`const`、`static`）这类细节会被并到近亲里，颜色与"纯 TextMate 着色"因此略有出入。这是主动换来的——换来的是**不读主题文件、远程窗口照样对**。
+
+tangle/editor/classify.js @
+
+<< classify.js >>= @
+@long
+
+	// 由 tangle/editor/plugin.nw 生成，请勿手改。
+	// 渲染层：scope → 语义类型。没有颜色，也没有主题文件。
+	//
+	// 客户端拿到类型之后自己往下走：类型 → 默认 scope → 当前主题的 tokenColors。
+	// 所以我们换不了主题，也不必换——换主题是客户端的事。
+	const TYPES = [
+	  "comment", "string", "regexp", "number", "keyword", "operator", "function",
+	  "variable", "parameter", "property", "type", "class", "struct", "interface",
+	  "enum", "namespace", "macro", "decorator", "typeParameter", "enumMember"
+	];
+
+	const INDEX = new Map(TYPES.map((name, i) => [name, i]));
+
+	// [scope 前缀, 语义类型]。顺序即优先级：具体的排前面（`storage.type` 必须早于 `storage`）。
+	const RULES = [
+	  ["comment", "comment"],
+	  ["string.regexp", "regexp"],
+	  ["string", "string"],
+	  ["constant.regexp", "regexp"],
+	  ["constant.numeric", "number"],
+	  ["constant.character.escape", "string"],
+	  ["constant.language", "variable"],
+	  ["constant.other", "variable"],
+	  ["keyword.operator", "operator"],
+	  ["keyword.control.directive", "macro"],
+	  ["entity.name.function.preprocessor", "macro"],
+	  ["storage.type", "type"],
+	  ["keyword", "keyword"],
+	  ["storage", "keyword"],
+	  ["entity.name.function", "function"],
+	  ["support.function", "function"],
+	  ["entity.name.type.struct", "struct"],
+	  ["entity.name.type.enum", "enum"],
+	  ["entity.name.type.interface", "interface"],
+	  ["entity.name.type.class", "class"],
+	  ["entity.name.type", "type"],
+	  ["entity.name.namespace", "namespace"],
+	  ["entity.name.tag", "type"],
+	  ["entity.other.attribute-name", "property"],
+	  ["support.type.property-name", "property"],
+	  ["support.type", "type"],
+	  ["support.class", "class"],
+	  ["variable.parameter", "parameter"],
+	  ["variable.language", "variable"],
+	  ["variable.other.property", "property"],
+	  ["variable.other.enummember", "enumMember"],
+	  ["variable", "variable"],
+	  ["meta.object-literal.key", "property"]
+	];
+
+	function fits(scope, prefix) {
+	  return scope === prefix || scope.indexOf(prefix + ".") === 0;
+	}
+
+	// 由内往外：最里面的 scope 最具体，认不出来就问外面一层。
+	// 返回类型在 TYPES 里的下标——那就是写进 token 里的那个数字。-1 表示不归我们管。
+	function classify(scopes) {
+	  for (let i = scopes.length - 1; i >= 0; i -= 1) {
+	    for (const rule of RULES) {
+	      if (fits(scopes[i], rule[0])) return INDEX.get(rule[1]);
+	    }
+	  }
+	  return -1;
+	}
+
+	module.exports = { TYPES: TYPES, classify: classify };
+
+~@
+
+~@
+
+### 6.3 装配层：把 token 编码成编辑器要的格式
+
+`extension.js` 主要做一件事：注册一个语义 token 提供者。要交的是一串整数，五个一组——`[相对行, 相对列, 长度, 类型, 修饰符]`，行列都相对于**上一个 token**，跨行时列从行首算。这叫增量编码，不是压缩花招：编辑器内部就是这么存的，省的是它的内存。
+
+另外挂两件"打字时的便利"，都是可选的糖，缺了不影响阅读：
+
+- **补全**：在 `<<` 里列出本文档已定义的 chunk 名（后面没有 `>>` 就顺手补上），行首打 `@` 给出 `@after:` / `@before:` / `@todo:`；
+- **回车**：在块头那行按回车，自动补一行缩进一级的空行 + 一行与块头同缩进的 `~@`，光标留在中间——省掉"写完代码再回去补收尾"。
+
+这两件都用一条行正则认块头，**不参与结构判定**：结构仍然只有语法与解析层那一份，这里认错了最多少一条候选、少补一行 `~@`，不会让哪一行变成代码。回车命令声明在 `package.json` 的 `keybindings` 里，`when` 带 `editorLangId == nw`，别处不受影响；不匹配块头时交回 `default:type`，自动缩进、列表续行都照旧。
+
+两个容易踩的地方：**`legend` 的顺序就是类型的编号**，所以那个数组不能随手排序，客户端按同一次注册里的次序解释我们填的数字；**交上去的 token 必须按位置递增且不重叠**，解析层给的就是这个顺序（TextMate 逐行吐 token，行内不重叠），所以这里不用排序，只是照着搬。
+
+结构行不用再筛：解析层只吐块体里的 token，`~@` 和块头根本不在列表里。
+
+主题关掉语义高亮时这层什么都不显示，所以激活时把那两个判定依据写进日志——下次不用再猜。
+
+tangle/editor/extension.js @
+
+<< extension.js >>= @
+@long
+
+	// 由 tangle/editor/plugin.nw 生成，请勿手改。
+	// 装配层：把解析层的 token 编码成语义 token 注册上去；另外挂两件打字时的便利（补全、回车）。
+	// 这一层没有语言规则，也没有色值。
+	const vscode = require("vscode");
+	const { tokens } = require("./tokenize");
+	const { TYPES, classify } = require("./classify");
+
+	// 下标即编号：这个数组的顺序不能动，否则已注册的编号会全部错位。
+	const legend = new vscode.SemanticTokensLegend(TYPES, []);
+
+	// 五个整数一个 token：[相对行, 相对列, 长度, 类型, 修饰符]。
+	// 相对的是上一个 token；跨行时列从行首算。
+	function pack(list) {
+	  const data = [];
+	  let line = 0;
+	  let start = 0;
+	  for (const t of list) {
+	    const type = classify(t.scopes);
+	    if (type < 0) continue;
+	    const length = t.end - t.start;
+	    if (length <= 0) continue;
+	    const deltaLine = t.line - line;
+	    data.push(deltaLine, deltaLine === 0 ? t.start - start : t.start, length, type, 0);
+	    line = t.line;
+	    start = t.start;
+	  }
+	  return new vscode.SemanticTokens(new Uint32Array(data));
+	}
+
+	const provider = {
+	  provideDocumentSemanticTokens(document) {
+	    return tokens(document.getText()).then(pack);
+	  }
+	};
+
+	// 块头行：`<< 路径: 名字 >>= @`。它只服务于"打字的便利"，不参与结构判定——
+	// 结构仍由语法与解析层决定；这里认错了，最多是少一条候选、少补一行 ~@。
+	const HEAD = /^([ \t]*)<<([^<>\n]+)>>[ \t]*=[ \t]*@[ \t]*$/;
+
+	// 文档里已定义的 chunk 名，按出现顺序去重。
+	function chunkNames(document) {
+	  const seen = new Set();
+	  for (const raw of document.getText().split("\n")) {
+	    const m = HEAD.exec(raw.replace(/\r$/, ""));
+	    if (m && m[2].trim()) seen.add(m[2].trim());
+	  }
+	  return [...seen];
+	}
+
+	// 在 `<<` 里给名字，行首的 `@` 给修饰符：都只改光标附近那一段，不碰整篇。
+	const completion = {
+	  provideCompletionItems(document, at) {
+	    const line = document.lineAt(at.line).text;
+	    const before = line.slice(0, at.character);
+	    const after = line.slice(at.character);
+
+	    const inChunk = /<<([^<>\n]*)$/.exec(before);
+	    if (inChunk) {
+	      const range = new vscode.Range(new vscode.Position(at.line, inChunk.index + 2), at);
+	      // 后面已经有 `>>` 就只补名字，否则连收尾一起补。
+	      const close = after.indexOf(">>") >= 0 ? "" : " >>";
+	      return chunkNames(document).map((name) => {
+	        const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Reference);
+	        item.range = range;
+	        item.insertText = name + close;
+	        return item;
+	      });
+	    }
+
+	    const atMark = /^([ \t]*)@[a-z]*$/.exec(before);
+	    if (atMark) {
+	      const range = new vscode.Range(new vscode.Position(at.line, atMark[1].length), at);
+	      return ["@after: ", "@before: ", "@todo: "].map((text) => {
+	        const item = new vscode.CompletionItem(text.trim(), vscode.CompletionItemKind.Keyword);
+	        item.range = range;
+	        item.insertText = text;
+	        return item;
+	      });
+	    }
+
+	    return undefined;
+	  }
+	};
+
+	// 照常打字：交给编辑器自己处理，自动缩进、列表续行、粘贴都还在。
+	function fallback() {
+	  return vscode.commands
+	    .executeCommand("default:type", { text: "\n" })
+	    .then(undefined, () => vscode.commands.executeCommand("type", { text: "\n" }));
+	}
+
+	// 块头那行回车：补一行缩进一级的空行，再补一行与块头同缩进的 `~@`，光标留在中间。
+	// 只在块头**行尾**生效：光标停在行中间时，补进去的两行会把块头劈开，宁可交回默认行为。
+	async function enter() {
+	  const editor = vscode.window.activeTextEditor;
+	  if (!editor || !editor.selection.isEmpty) return fallback();
+	  const at = editor.selection.active;
+	  const line = editor.document.lineAt(at.line).text;
+	  const m = HEAD.exec(line);
+	  if (!m || line.slice(at.character).trim()) return fallback();
+	  const body = m[1] + "\t";
+	  const end = m[1] + "~@";
+	  await editor.edit((b) => b.insert(at, "\n" + body + "\n" + end));
+	  const to = new vscode.Position(at.line + 1, body.length);
+	  editor.selection = new vscode.Selection(to, to);
+	}
+
+	function activate(context) {
+	  context.subscriptions.push(
+	    vscode.languages.registerDocumentSemanticTokensProvider({ language: "nw" }, provider, legend),
+	    vscode.languages.registerCompletionItemProvider({ language: "nw" }, completion, "<", "@"),
+	    vscode.commands.registerCommand("nw.enter", enter)
+	  );
+	  console.log("neoweb: 第二层已激活（scope 由 TextMate 给，颜色由编辑器按主题上）", {
+	    theme: vscode.workspace.getConfiguration("workbench").get("colorTheme"),
+	    semanticHighlighting: vscode.workspace.getConfiguration("editor").get("semanticHighlighting.enabled")
+	  });
+	}
+
+	function deactivate() {}
+
+	module.exports = { activate, deactivate };
+
+~@
+
+~@
+
+### 6.4 分层以后能看见什么
+
+分层的收益不只是"好看"：解析层和渲染层都不依赖编辑器，于是有一个不花编辑器也能跑的调试命令。给它一篇 `.nw`，它按行打印每个 token 的 scope 和它被归到哪一类。**没有颜色那一列**——这条链路里根本没有颜色，颜色在客户端。
+
+调块体着色之前先跑它，比在编辑器里猜快得多。
+
+tangle/editor/tools/tokens.js @
+
+<< tokens tool >>= @
+
+	// 由 tangle/editor/plugin.nw 生成，请勿手改。
+	// 调试用：不开编辑器也能看见"这篇 .nw 里每个 token 的 scope，以及它被归到哪一类"。
+	//
+	//   node tangle/editor/tools/tokens.js "book/Chapter 2/1-syntax.nw"
+	//
+	// 没有颜色：颜色在客户端按主题算，不在这条链路里。
+	const fs = require("fs");
+	const { tokens } = require("../tokenize");
+	const { TYPES, classify } = require("../classify");
+
+	async function main() {
+	  const file = process.argv[2];
+	  if (!file) {
+	    console.error("用法: node tools/tokens.js <文件.nw>");
+	    process.exit(2);
+	  }
+	  const text = fs.readFileSync(file, "utf8");
+	  const lines = text.split("\n");
+	  for (const t of await tokens(text)) {
+	    const lexeme = lines[t.line].slice(t.start, t.end);
+	    if (!lexeme.trim()) continue;
+	    const type = classify(t.scopes);
+	    const name = type < 0 ? "-" : TYPES[type];
+	    console.log(String(t.line + 1).padStart(4) + "  " + name.padEnd(10) + " " + JSON.stringify(lexeme).padEnd(22) + " " + t.scopes.slice(1).join(" "));
+	  }
+	}
+
+	main().catch((e) => {
+	  console.error(e);
+	  process.exit(1);
+	});
+
+~@
+
+~@
+
+## 七、图标
+
+图标是文字形状，不是二进制素材，所以也由这份源生成：改配色就改这里，不必额外记一个文件。
+
+图案选"两行灰线 + 一块实心"——两行线是散文，实心块是代码，也就是这份文档的形状。**不用尖括号**：文件栏里会跟 HTML 的 `<>` 撞。
+
+深浅两档必须同形，只换颜色。不同形的话，切换主题时图标会"跳"一下；而"跳"这种细节是编辑器里最先被注意到的东西。
+
+图案在画布里**不左右对称**：左留 4.6、右留 0.6。这是对着文件栏量的，不是手误——同一行里 python/M 图标的墨迹从 14 起，我们的从 12 起，偏左 2px；整幅右移 2 个单位补上，墨迹就和邻居对齐了。**别把它"修正"回几何居中**，那样在文件栏里会重新偏左。
+
+tangle/editor/icons/nw.svg @
+
+<< icon light >>= @
+	<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+	  <!-- .nw 文件图标（浅色档）。
+	       两行灰线 = 散文，一块实心色块 = 代码：这就是这份文档的形状。
+	       不用尖括号：文件栏里会跟 HTML 的 <> 撞。
+	       配色沿用 weave 输出的强调色（暖色 #a4463c）与中性灰（#9aa5ad）。
+	       左右不对称（左 4.6、右 0.6）是故意的：文件栏里按墨迹定位，对称画法实测偏左
+	       2px（12–24 vs 邻居 14–26）。别"修正"回 2.6。 -->
+	  <rect x="4.6" y="2.5" width="10.8" height="1.4" rx="0.7" fill="#9aa5ad"/>
+	  <rect x="4.6" y="5.3" width="7.0" height="1.4" rx="0.7" fill="#9aa5ad"/>
+	  <rect x="4.6" y="8.2" width="10.8" height="5.2" rx="1.5" fill="#a4463c"/>
+	</svg>
+~@
+
+~@
+
+深色档不是"另一张图"，是同一张图的另一套颜色：中性灰提到 `#7f8c96`、强调色提到 `#e59a90`，否则在深底上会糊成一团。
+
+两档必须同形——形状不同的话，切换主题时图标会"跳"一下，而人会以为文件类型变了。
+
+tangle/editor/icons/nw-dark.svg @
+
+<< icon dark >>= @
+	<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+	  <!-- .nw 文件图标（深色档）。结构与浅色档完全一致，只换两个颜色：
+	       中性灰提到 #7f8c96、强调色提到 #e59a90，否则在深底上糊成一团。
+	       两档必须同形，否则切换主题时图标会"跳"一下。
+	       左边留 4.6、右边留 0.6 的理由见浅色档。 -->
+	  <rect x="4.6" y="2.5" width="10.8" height="1.4" rx="0.7" fill="#7f8c96"/>
+	  <rect x="4.6" y="5.3" width="7.0" height="1.4" rx="0.7" fill="#7f8c96"/>
+	  <rect x="4.6" y="8.2" width="10.8" height="5.2" rx="1.5" fill="#e59a90"/>
+	</svg>
+~@
+
+~@
+
+## 八、生成与安装
+
+四条命令，各自的职责别混：
+
+- `make deps` 在 `tangle/editor/` 里装那三个依赖（`vscode-textmate`、`vscode-oniguruma`、`tm-grammars`）。`node_modules` 不入库：它是别人的代码，版本写在 `package.json` 里；
+- `make plugin` 把本文件展开成 `tangle/editor/` 下的十一个产物；
+- `make grammar` 再跑一次生成器，产出 `syntaxes/nw.tmLanguage.json`（第二级生成物，所以单独一步）；
+- `make ext` 把项目里的 `editor/` 链接进 CodeBuddy 的扩展目录，之后改源码只需 reload 窗口。
+
+十一个产物都**入库**。理由是它们才是真正被编辑器加载的东西，改动能一眼看见；至于"有人手改了产物忘了改源码"这种漂移，交给 `make verify`：重新展开一遍，与仓库里的副本逐字节比对。
+
+要看某个 token 被归成了哪一类，用 6.4 那个命令；要看它最终长什么颜色，只能在编辑器里看——颜色在客户端算，这既是分层的代价，也是它能跟住主题的原因。
+
+@todo: 图标现在只有浅深两档的 SVG，还没有把 chunk 结构画进去（比如折叠态的缩略）。要等插件做折叠功能时一起设计，否则是空图案。
+
+

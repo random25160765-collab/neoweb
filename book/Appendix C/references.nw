@@ -1,0 +1,30 @@
+# 参考资料
+
+## 一、奠基
+
+Knuth, **Literate Programming**（The Computer Journal 27(2):97–111, 1984；书，1992）。chunk、web、tangle/weave 这套词汇的来源。当时的约束是"程序太复杂，人读不懂"，今天的约束是"AI 生成太快，人跟不上"——问题形状不同，解法骨架相同。
+
+## 二、最近的同行者
+
+- **notlob: A Literate Programming Environment for Human and Machine Agents**（arXiv:2608.24644，2026.08）——最接近的一项。为人和机器 agent 共同构建文学化程序而设计环境；有语法、解析器、name-graph、`~test`/`~property` 标记。走"语言绑定"路线，代码仓库未找到。
+- **VLP: Guiding Human Validation of LLM-Generated Code via Verifiable Literate Programming**（arXiv:2607.02333，2026.07）——用文学化文档作为可验证的中间层，侧重审查与验证。
+- **Literate Programming: Donald Knuth, WEB, and Contemporary Workflows**（Zenodo，Zhovten Games，2026）——提出 Prompt-Literate Workflow：人写 plan + chunk 契约 + 有界 prompt + 测试 + TRACE。非同行评审。配套仓库 `Zhovten-Games/literate-programming`。
+- **The Fenced Block Principle**（DEV Community，2026.10）——每个代码块被意图声明"围栏"包围，配对关系可被 linter 检查，并给出双栏 review 视图。
+- **Literate Programming With LLMs?**（Sun & Staron, IEEE TSE 52(2):468-487, 2026）——正式同行评审，评估 LLM 的文学化编程能力，不是工作流设计。
+- **Natural Language Outlines for Code**（Google 等，FSE 2025）——用 LLM 生成自然语言大纲辅助人读代码；方向是呈现格式，不是协作协议。
+
+## 三、相邻的对照物
+
+- **Sphinx / reStructuredText**——"文档在代码之外"最成熟的方案。它假设文档由人主动维护，而 agent 的产出速度让人没有余力做这件事。一项 2026 年 10 月被 APSEC 接收的研究分析了 29,669 个 AI 生成的 PR，发现 63.2% 修改了代码但没有更新任何文档；重构类任务中这个比例到 77.5%。不是人懒，是节奏不匹配。
+- **Rust doctest**——文档里的代码被编译验证。约束很弱：文档测试通常是自包含片段，与正文叙述没有强绑定，而且只覆盖 `///` 注释。它验证"这段示例能跑"，不验证"这段叙述与实现一致"。
+- **Prompt-Literate Workflow**——与本项目最接近的工作流形态，但它把 chunk 契约当作 prompt 的输入；本项目把叙述当成源文件本身。
+
+## 四、我们判断的空白
+
+思想层面已有同行者，工程实现层面仍然空旷：**没有成熟工具把 chunk 结构、人机交替落笔、tangle/weave 闭环、IDE 内补全约束整合在一起**。arXiv 上相关论文多为"思路描述 + 初步验证"，还没有一个能自举、能被编辑器当日常工具用的实现。
+
+这也是这个项目不发论文的原因：论文是外部描述，书是自我展开。本项目 tangle 出工具、weave 出论证，读者读它就是在读论文、用工具、看实现——三件事在同一份源文件里发生。版本管理（git tag）替代"发表版本"，引用一个 commit 比引用一篇论文更精确。
+
+代价也诚实：放弃学术渠道的传播与背书，靠读者读完之后告诉别人。
+
+→ 回目录：[[menu.nw]]

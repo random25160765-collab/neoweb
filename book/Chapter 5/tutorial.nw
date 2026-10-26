@@ -1,0 +1,159 @@
+# tutorial
+
+`tutorial` 借的是 `vimtutor` 的形态：不写文档让人读，而是给一份稿子让人改，改完立刻告诉他改对没有。区别只在反馈来源——`vimtutor` 靠自觉，这里靠 `check`。
+
+它和命令行那一篇第九节的 `init` 是同一条理由的两面：教程要教的就是"`.nw` 怎么用"，所以不能要求读者先会用它。也因此编进二进制，装好就能用。但它什么都不留下——稿子在临时目录里，学完就没了。
+
+## 一、三步一循环
+
+三步一循环：**说目标 → 开编辑器 → 跑一遍展开**。展开失败就把 `Error::where()` 原样打出来，那是全文唯一一处错误格式，学习者第一次见它就该是在这里。
+
+教程稿子落在 `mkdtemp` 出来的临时目录里：学习者会把它改坏，改坏的稿子不该出现在任何人的仓库里。每次运行都是新目录，除非那一步的文件已经存在——重跑同一课不会把人的改动抹掉。
+
+## 二、四堂课
+
+四条课覆盖四件事：补一个被引用的片段、分清产物与片段、撞上一次循环引用、自己写第一篇。验收不靠人眼：`check_one` 走的就是 `check` 那条路（解析 + 展开，不写盘），再加上一条"产物数够不够"。
+
+这一篇同样不声明产物：`<< cmd-tutorial >>` 是片段，由命令行那一篇在 `cmd-run` 之后引用。
+
+<< cmd-tutorial >>= @
+@long
+	// 一步：给一份起始稿、一句目标、一个产物数下限。
+	// 教程编进二进制——它就是"第一次接触"该看到的那几页。
+	struct Lesson {
+		const char* file;    // 临时目录里的文件名
+		const char* start;   // 起始稿（该文件还不存在时才写）
+		const char* goal;    // 打印给人看的目标
+		int want_products;   // 展开后至少几个产物；0 表示不检查
+	};
+
+	static const Lesson LESSONS[] = {
+		{"1-first.nw", R"NW(
+	```
+	# 第一步：把缺的那块补上
+
+	这一页要展开成 tangle/hello.c。块体里引用了 `<< hello >>`，但这一页里还没有定义它。
+
+	目标：在文件末尾补一个 `<< hello >>` 的定义——块头、一行 printf、`~@` 收尾。
+
+	<<tangle/hello.c: main>>= @
+		#include <stdio.h>
+
+		int main(void) {
+			<< hello >>
+			return 0;
+		}
+	~@
+	```
+	)NW",
+		 "补上被引用的 `<< hello >>`，让 check 过", 1},
+
+		{"2-two.nw", R"NW(
+	```
+	# 第二步：产物与片段
+
+	头里带路径的块（`<<tangle/a.c: one>>`）会落成一个文件；头里只有名字的是片段，等着被引用。
+
+	现在只有一个产物。
+
+	目标：再加一个产物——在末尾补一个 `<<tangle/b.c: ...>>` 块，写一行什么就行。
+
+	<<tangle/a.c: one>>= @
+		int a = 1;
+	~@
+	```
+	)NW",
+		 "再加一个产物，让产物数变成两个", 2},
+
+		{"3-loop.nw", R"NW(
+	```
+	# 第三步：撞上一次报错
+
+	下面两个块互相引用。check 会报循环引用——这类错误是工具最值钱的地方：
+	它指得出是哪一行、哪一个名字。
+
+	目标：让它通过（删掉一条引用，或把引用换成别的）。
+
+	<<tangle/loop.c: a>>= @
+		<< b >>
+	~@
+
+	<<tangle/loop.c: b>>= @
+		<< a >>
+	~@
+	```
+	)NW",
+		 "拆掉这个循环，让 check 过", 0},
+
+		{"4-mine.nw", R"NW(
+	```
+	# 第四步：你自己写
+
+	没有模板了。目标：check 通过，并且至少有一个产物——也就是写出一个头里带路径的块。
+	```
+	)NW",
+		 "写出你自己的第一篇：check 通过，且有一个产物", 1},
+	};
+
+	// 回车继续；Ctrl-D（或管道读完）就收工，别把人卡在循环里。
+	static bool wait_enter() {
+		string line;
+		return static_cast<bool>(std::getline(std::cin, line));
+	}
+
+	static void edit_in(const string& path) {
+		const char* ed = std::getenv("EDITOR");
+		string cmd = string(ed && *ed ? ed : "vi") + " \"" + path + "\"";
+		if (std::system(cmd.c_str()) == -1) throw Error("<tutorial>", 0, "起不来编辑器：" + cmd);
+	}
+
+	// 与 check 走同一条路：解析 + 展开，不写盘。返回空串表示这一步达标。
+	static string check_one(const string& path, int want_products) {
+		try {
+			Document doc = parse(read_file(path), path);
+			vector<Product> ps = tangle(doc, path, false);
+			if (static_cast<int>(ps.size()) < want_products)
+				return "还差一点：这一步要 " + std::to_string(want_products) + " 个产物，现在只有 " +
+				       std::to_string(ps.size()) + " 个";
+			return "";
+		} catch (const Error& e) {
+			return e.where();
+		}
+	}
+
+	static int cmd_tutorial(const Args&) {
+		// 临时目录：学习者会改坏稿子，改坏的东西不该落在任何仓库里。
+		string base = (std::filesystem::temp_directory_path() / "nw-tutorial-XXXXXX").string();
+		vector<char> buf(base.c_str(), base.c_str() + base.size() + 1);
+		if (!mkdtemp(buf.data())) throw Error("<tutorial>", 0, "建不了临时目录");
+		string dir(buf.data());
+		int n = static_cast<int>(sizeof(LESSONS) / sizeof(LESSONS[0]));
+
+		std::cout << "教程稿子建在 " << dir << "\n"
+		          << "每一步：回车打开文件，改完存盘退出，我来 check。\n";
+		for (int i = 0; i < n; ++i) {
+			const Lesson& l = LESSONS[i];
+			string path = dir + "/" + l.file;
+			// 文件已经存在就不重写：重跑同一课不该抹掉人的改动。
+			if (!std::ifstream(path)) write_file(path, l.start);
+			while (true) {
+				std::cout << "\n=== 第 " << (i + 1) << "/" << n << " 步：" << l.file << " ===\n"
+				          << l.goal << "\n\n回车开始编辑（Ctrl-D 退出）：";
+				if (!wait_enter()) {
+					std::cout << "\n";
+					return 0;
+				}
+				edit_in(path);
+				string bad = check_one(path, l.want_products);
+				if (bad.empty()) {
+					std::cout << "✓ 过了。\n";
+					break;
+				}
+				std::cout << "\n" << bad << "\n";
+			}
+		}
+		std::cout << "\n四步走完。稿子留在 " << dir << "，想重来就删掉它再跑一次。\n";
+		return 0;
+	}
+
+~@

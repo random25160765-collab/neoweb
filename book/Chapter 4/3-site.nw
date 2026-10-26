@@ -1,0 +1,130 @@
+# 一本书
+
+`nw weave 单篇.nw 单文件.html` 出来的是一张孤零零的页面——适合检查某一段，不像书。要给一本书，就得知道**篇目顺序**，而那件事只有调用方知道，所以由命令行给出：`nw weave -o weave 篇一 篇二 篇三 …` 的顺序就是阅读顺序。
+
+站点的四样东西都由这个顺序推出来：每篇一个 URL、一栏常驻的全书目录、一个按章分组的 index、每页底部的上下章。顺序本身来自书目录（下一篇）：不给别的参数时就去读 `tangle/tools/book.yaml`，读不到就报错——**顺序不该由命令行临时决定**。
+
+产物仍是同一份 `weave.cpp`：
+
+tangle/weave.cpp @
+
+## 一、上下章：两格，两头留空
+
+导航只要两格：上一章在左、下一章在右。"目录"不再占一格——它已经在左栏常驻，每页再指一次是重复。
+
+头尾仍然用 `<span></span>` 占位而不是省略：空元素仍占一份栅格，两张卡片才能始终各占一半，翻页时不用重新找位置。
+
+<< page-nav >>= @
+	// 上下章导航：两格固定，头尾用空 span 占位，卡片宽度不随页变。
+	static string nav_html(const vector<Page>& pages, size_t k) {
+		std::ostringstream out;
+		out << "<nav class=\"pager\">";
+		if (k > 0) out << "<a class=\"prev\" href=\"" << pages[k - 1].url << "\">← "
+		               << html_escape(pages[k - 1].title) << "</a>";
+		else out << "<span></span>";
+		if (k + 1 < pages.size()) out << "<a class=\"next\" href=\"" << pages[k + 1].url << "\">"
+		                              << html_escape(pages[k + 1].title) << " →</a>";
+		else out << "<span></span>";
+		out << "</nav>\n";
+		return out.str();
+	}
+
+~@
+
+## 二、左栏：一份常驻的目录
+
+翻到任何一页，左边都摆着全书目录，当前位置加一条竖线。这是"书"和"一堆页面"的区别：前者始终知道自己在哪儿，后者的导航只告诉你下一步去哪。
+
+侧栏用 `position: sticky` 而不是固定定位：它跟着滚动走，但到页面底部会自己停下，不会压住正文最后几行。`max-height: 100vh` 加 `overflow-y: auto` 是配套的——目录长过一屏时，滚的是侧栏，不是整页。
+
+窄屏不折叠成汉堡：那需要一个按钮和一段脚本。这里直接把它退成顶部的一条横向列表（CSS 断点里做的事），点起来更快，也不会挡住正文。
+
+<< page-toc >>= @
+	// 左栏：全书目录，按部（group）分组，当前页标记 here。
+	static string toc_html(const vector<Page>& pages, size_t k) {
+		std::ostringstream out;
+		out << "<aside class=\"toc\">\n<a class=\"home\" href=\"index.html\">目录</a>\n";
+		string cur;
+		bool open = false;
+		for (size_t i = 0; i < pages.size(); ++i) {
+			const Page& p = pages[i];
+			if (!open || p.group != cur) {
+				if (open) out << "</ul>\n";
+				cur = p.group;
+				if (!cur.empty()) out << "<div class=\"part\">" << html_escape(cur) << "</div>\n";
+				out << "<ul>\n";
+				open = true;
+			}
+			out << "<li><a href=\"" << p.url << "\"";
+			if (i == k) out << " class=\"here\"";
+			out << ">" << html_escape(p.title) << "</a></li>\n";
+		}
+		if (open) out << "</ul>\n";
+		out << "</aside>\n";
+		return out.str();
+	}
+
+~@
+
+## 三、目录页：按章分组
+
+目录页只按"顺序"生成，不重排：顺序由命令行给，这里只负责在换章时插一个小标题。
+
+`open` 这个布尔值是为了处理"第一组还没有列表可关"这种边界。写成"先开再关"要判断三次，不如用一个标记。
+
+目录页不给侧栏：它本身就是目录，再摆一栏左目录是同一份东西说两遍。
+
+<< site-index >>= @
+	// 目录页：按章分组，组内保持命令行给的顺序。没有侧栏，正文居中。
+	static string site_index(const vector<Page>& pages) {
+		std::ostringstream out;
+		out << "<article class=\"doc\">\n<h1>目录</h1>\n";
+		string cur;
+		bool open = false;
+		for (const auto& p : pages) {
+			if (!open || p.group != cur) {
+				if (open) out << "</ul>\n";
+				cur = p.group;
+				if (!cur.empty()) out << "<h2 class=\"part\">" << html_escape(cur) << "</h2>\n";
+				out << "<ul class=\"toc\">\n";
+				open = true;
+			}
+			out << "<li><a href=\"" << p.url << "\">" << html_escape(p.title) << "</a></li>\n";
+		}
+		if (open) out << "</ul>\n";
+		out << "</article>\n";
+		return page_shell("目录", "", out.str());
+	}
+
+~@
+
+## 四、组装：先算身份，再逐页写
+
+两遍循环，不能合成一遍：第一遍要把所有页的身份算齐——因为**第一页的"下一章"要指向第二页**，写第一页时它还没算出来。
+
+这是"就地生成"最常踩的坑：单遍循环里能拿到前文，拿不到后文。
+
+<< write-site >>= @
+	// 多篇 → 一个站点：身份由调用方算好（书目录里就有部名），这里只负责逐页写。
+	int write_site(const vector<Document>& docs, const vector<Page>& pages, const string& dir) {
+		// 双链的显示文字：先把每一页的 url → 标题铺开，再逐页渲染。
+		g_titles.clear();
+		for (const auto& p : pages) g_titles[p.url] = p.title;
+		for (size_t k = 0; k < docs.size(); ++k) {
+			// 侧栏每页都要重新算：当前页那一项要标出来。
+			write_file(dir + "/" + pages[k].url,
+			           render_document(docs[k], pages[k].url, pages[k].title,
+			                           toc_html(pages, k), nav_html(pages, k)));
+			std::cout << "写出 " << dir << "/" << pages[k].url << "\n";
+		}
+		write_file(dir + "/index.html", site_index(pages));
+		std::cout << "写出 " << dir << "/index.html（" << pages.size() << " 篇）\n";
+		return 0;
+	}
+
+~@
+
+
+~@
+
+站点能出了，但顺序还是命令行说一次算一次。下一篇讲顺序的来源。
