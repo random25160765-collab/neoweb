@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config python3 graphviz \
+            libcmark-gfm-dev libsource-highlight-dev libboost-regex-dev
+
+      - name: npm 依赖与 KaTeX
+        run: make deps
+
+      - name: 构建全链
+        run: make
+
+      - name: 产物对账
+        run: make verify
+
+      - name: 语法条款
+        run: make test
+
+      - name: 全书解析
+        run: make check

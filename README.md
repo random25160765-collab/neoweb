@@ -12,7 +12,7 @@ AI 写代码的速度已经超过了人读代码的速度，理解的成本已�
 git clone https://github.com/random25160765-collab/neoweb.git
 cd neoweb
 make              # 元层种子展开 → 编译 nw → 展开插件与语法 → 渲染整站到 weave/
-make install      # 装 nw 与 man 页到 ~/.local（不在 PATH 上会提示）
+make install      # 装到 ~/.local；PATH 里没有就把该目录写进 shell 启动文件
 nw --help
 ```
 
@@ -28,8 +28,10 @@ sudo apt-get install build-essential pkg-config \
 同时环境里还要安装 Node。VS Code 插件另需三个 npm 依赖（`tm-grammars`、`vscode-oniguruma`、`vscode-textmate`），和 Katex 一起处理：
 
 ```sh
-make deps         # npm install + 把 KaTeX 解到 tangle/tools/vendor/
+make deps         # npm install + 把 KaTeX 解到 tangle/vendor/
 ```
+
+不跑 `make deps` 也能构建、也能出页面，代价是公式：`enhance` 找不到 KaTeX 时把 LaTeX 原样留在页面里，`$L(c)$` 就是字面的 `$L(c)$`（页面不报错，所以更容易被忽略）。
 
 ## 编辑器插件
 
@@ -42,6 +44,12 @@ code --install-extension tangle/nw-*.vsix
 ```
 
 也可以在 VS Code 的插件市场中下载扩展。
+
+## 发布
+
+发布件只有一种：Linux x86_64、动态链接 `libcmark-gfm` 与 `source-highlight` 的二进制（`v0.1.0` 起）。别的平台没有预编译包，只能从源码构建——依赖就是上面那几行 apt。
+
+发布是手工的：`git tag vX.Y.Z`，`make vsix`，把 `tangle/nw-*.tar.gz` 与 vsix 传上去。`.github/workflows/ci.yml` 只跑"能不能构建、产物对不对得上"，不产出发布件。
 
 ## License
 

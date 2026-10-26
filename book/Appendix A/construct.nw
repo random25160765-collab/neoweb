@@ -544,7 +544,9 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 
 删掉全部次生产物，验证"从零能不能起"。与 `clean` 的区别：`clean` 只删二进制与 HTML，这里连生成的源码一起删。
 
-产物只落在两处：`tangle/` 与 `weave/`。契约测试、开发服务器、书目录都是产物，跟着各自的源平铺在 `tangle/` 下——根目录除了手写的元层（`Makefile`、`bootstrap.py`、`.gitignore`、`LICENSE`）和 `book/`，不该再有别的东西；`book/` 里也不该有产物。
+产物只落在两处：`tangle/` 与 `weave/`。契约测试、开发服务器、书目录都是产物，跟着各自的源平铺在 `tangle/` 下——根目录除了手写的元层（`Makefile`、`bootstrap.py`、`.gitignore`、`LICENSE`、`.github/`）和 `book/`，不该再有别的东西；`book/` 里也不该有产物。
+
+`.github/workflows/ci.yml` 属于元层而不是产物：它跑在"这本书还没展开"的干净克隆上，必须先有能跑的 make，才谈得上产物。它只做四件事——构建、对账、条款、全书解析；发布件仍由人手工打包。
 
 <<tangle/Makefile~: scratch>>= @
 
