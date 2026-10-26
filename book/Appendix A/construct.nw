@@ -166,18 +166,20 @@ nw check sort.nw    # 试试手
 	# 书目录是产物：由 book/menu.nw tangle 出来，再由 nw 自己读（缺省路径）。
 	# 构建脚本不记目录——那是书的结构，不是构建的私事。
 
-	# 处理器的源码分散在四章里：条款、类型、工具、解析（第 2 章）、tangle（第 3 章）、
-	# weave（第 4 章）、tutorial 与命令行（第 5 章）。
+	# 处理器的源码分散在五章里：条款、类型、工具、解析（第 2 章）、tangle（第 3 章）、
+	# weave（第 4 章）、tutorial 与命令行（第 5 章）、两份写作规范与 init 的模板（第 6 章）。
 	# tangle 时按这个顺序合并——顺序就是 C++ 里"先声明后使用"的顺序。
 	# 语法篇要产契约测试（tangle/tests/test_spec.py），所以在清单里。
 	# 命令表不在清单里：它是附录 A 控制面的产物，不由这本书的程序产出。
 	# 引号形态给 shell，反斜杠形态给 make 的依赖行，两者不能混。
-	PROC = "book/Chapter 2/1-syntax.nw" "book/Chapter 2/2-types.nw" "book/Chapter 2/3-util.nw" "book/Chapter 2/4-parse.nw" "book/Chapter 3/tangle.nw" "book/Chapter 4/1-markdown.nw" "book/Chapter 4/2-render.nw" "book/Chapter 4/3-site.nw" "book/Chapter 4/4-book.nw" "book/Chapter 5/tutorial.nw" "book/Chapter 5/cli.nw"
+	PROC = "book/Chapter 2/1-syntax.nw" "book/Chapter 2/2-types.nw" "book/Chapter 2/3-util.nw" "book/Chapter 2/4-parse.nw" "book/Chapter 3/tangle.nw" "book/Chapter 4/1-markdown.nw" "book/Chapter 4/2-render.nw" "book/Chapter 4/3-site.nw" "book/Chapter 4/4-book.nw" "book/Chapter 5/tutorial.nw" "book/Chapter 5/cli.nw" "book/Chapter 6/skills/1-structure.nw" "book/Chapter 6/skills/2-prose.nw" "book/Chapter 6/init.nw" "book/Appendix A/tools.nw"
 
-	# 处理器拆成五个 .cpp 加一个头文件：解析、展开、渲染、命令行、工具各一个。
+	# 处理器拆成七个 .cpp 加两个头文件：解析、展开、渲染、命令行、两个站点工具各一个；
+	# 头文件一份是模块边界，一份是 init 写出的模板（文案）。
 	# 编译命令与依赖都用这份清单，加文件只改这一行。
-	NW_SRC = tangle/util.cpp tangle/parse.cpp tangle/tangle.cpp tangle/weave.cpp tangle/main.cpp
-	NW_HDR = tangle/nw.hpp
+	NW_SRC = tangle/util.cpp tangle/parse.cpp tangle/tangle.cpp tangle/weave.cpp \
+	         tangle/main.cpp tangle/tools/serve.cpp tangle/tools/enhance.cpp
+	NW_HDR = tangle/nw.hpp tangle/templates.hpp
 
 ~@
 
@@ -191,6 +193,7 @@ nw check sort.nw    # 试试手
 	# 把它们记进这份账，等于要求每次 verify 之前先跑一遍示例。
 	GENERATED = tangle/tools/book.yaml \
 	            tangle/nw.hpp \
+	            tangle/templates.hpp \
 	            tangle/util.cpp \
 	            tangle/parse.cpp \
 	            tangle/tangle.cpp \
@@ -216,14 +219,14 @@ nw check sort.nw    # 试试手
 	            tangle/tools/enhance.cpp \
 	            tangle/tests/test_spec.py
 
-	.PHONY: all nw install plugin deps build-files grammar html tools serve ext vsix selfhost crosscheck examples hello pair fragment sort check test verify scratch clean
+	.PHONY: all nw install plugin deps build-files grammar html serve ext vsix selfhost crosscheck examples hello pair fragment sort check test verify scratch clean
 
 ~@
 
 默认目标把二进制、插件产物、规则自身、命令表、HTML 一次做齐。它不跑 `verify`：对账是 CI 的事，不是每次构建的事。
 
 <<tangle/Makefile~: all>>= @
-	all: $(NW) plugin build-files grammar html tools tangle/command.yaml
+	all: $(NW) plugin build-files grammar html tangle/command.yaml
 
 ~@
 
@@ -231,15 +234,17 @@ nw check sort.nw    # 试试手
 
 目录也在这一步之前长出来：`tangle/tools/book.yaml` 是 `book/menu.nw` 的产物，规则和别的 tangle 目标一样。写在这条 `html` 规则旁边，是因为 HTML 是它唯一的消费者——`nw weave` 靠它排页。
 
-渲染之后还有一步增强：`dot` 图源变成 SVG、`$…$` 变成 MathML。这一步放在 weave 外面，是为了让 weave 保持"只依赖标准库和两个系统库"，而不是"依赖这台机器装了什么"。工具缺席时它自己跳过，页面回到源码形态，构建不红。
+渲染之后还有一步增强：`dot` 图源变成 SVG、`$…$` 变成 MathML。它由 `weave` 在写完页面之后自己调用，不再另起一个进程回头扫 HTML——那三种形状（`<pre class="dot">`、`<span class="math">`、`<div class="math-block">`）本来就是 weave 自己写出去的，认它们的人却住在另一个二进制里，改一处忘一处就是"页面偶尔画不出图"，而且不报错。
+
+依赖方向没有变坏：缺 `dot`、缺 `node` 时增强自己跳过，页面回到源码形态，构建不红。
 
 <<tangle/Makefile~: html>>= @
 	# 全书各篇各渲染一份 HTML 到 weave/，文件名取 .nw 的基名（chapter 目录不进入名字）
 	# 先清空 weave/：删掉一篇后，旧的 HTML 不该继续躺在那里——那不是"过期"，是"不存在"。
-	html: $(NW) tangle/tools/book.yaml tangle/build/enhance
+	# 增强在 nw weave 里自己收尾，这条规则不必再跟一个进程。
+	html: $(NW) tangle/tools/book.yaml
 		@rm -rf weave && mkdir -p weave
 		@$(NW) weave -o weave
-		@tangle/build/enhance weave
 
 	# 目录：目录章展开出 book.yaml。
 	tangle/tools/book.yaml: $(NW) book/menu.nw
@@ -251,7 +256,7 @@ nw check sort.nw    # 试试手
 
 <<tangle/Makefile~: bootstrap>>= @
 	# 第一步：用元层的种子展开一次，得到 C++ 源码与契约测试（此刻还没有 $(NW)）
-	$(NW_SRC) $(NW_HDR) tangle/tests/test_spec.py: book/Chapter\ 2/1-syntax.nw book/Chapter\ 2/2-types.nw book/Chapter\ 2/3-util.nw book/Chapter\ 2/4-parse.nw book/Chapter\ 3/tangle.nw book/Chapter\ 4/1-markdown.nw book/Chapter\ 4/2-render.nw book/Chapter\ 4/3-site.nw book/Chapter\ 4/4-book.nw book/Chapter\ 5/tutorial.nw book/Chapter\ 5/cli.nw bootstrap.py
+	$(NW_SRC) $(NW_HDR) tangle/tests/test_spec.py: book/Chapter\ 2/1-syntax.nw book/Chapter\ 2/2-types.nw book/Chapter\ 2/3-util.nw book/Chapter\ 2/4-parse.nw book/Chapter\ 3/tangle.nw book/Chapter\ 4/1-markdown.nw book/Chapter\ 4/2-render.nw book/Chapter\ 4/3-site.nw book/Chapter\ 4/4-book.nw book/Chapter\ 5/tutorial.nw book/Chapter\ 5/cli.nw book/Chapter\ 6/skills/1-structure.nw book/Chapter\ 6/skills/2-prose.nw book/Chapter\ 6/init.nw book/Appendix\ A/tools.nw bootstrap.py
 		$(PYTHON) bootstrap.py -o . $(PROC)
 
 ~@
@@ -349,38 +354,17 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 
 ~@
 
-开发工具也是产品的一部分，同样要能被重新生成——所以它们先是 tangle 目标，再是编译目标，而不是仓库里两个手写的脚本。
+开发工具也是产品的一部分，同样要能被重新生成——它们的 `.cpp` 和其它翻译单元一样由 `bootstrap.py` 先展出来，之后就跟 `nw` 一起编译，没有第二条编译规则。
 
-`tools` 只生成、不运行：谁生成、谁运行分开，CI 和本地才能各取所需。
+起服务器。依赖写成 `html`：打开浏览器就该看到刚生成的页面，而不是上次构建的残留；重渲染则交给 `nw watch` 自己在源变了以后做。
 
-两件事要注意。**两个 `.cpp` 写在同一行依赖里**：它们是同一篇的产物，分开写就会漏掉一个，而漏掉的那个会在下一次改 `.nw` 后悄悄过期。**二进制落在 `tangle/build/`**，与 `nw` 同一个地方——`clean` 删目录就全删，不必逐个点名；`serve` 还要多一个 `-pthread`，因为它一个请求起一个线程。
-
-<<tangle/Makefile~: tools>>= @
-	# 两个工具：源由 tangle 展开（chunk 名里写着路径），再由编译器编成二进制。
-	tools: tangle/build/serve tangle/build/enhance
-
-	# 两个工具同属一篇，一次展开出两份 .cpp。
-	tangle/tools/serve.cpp tangle/tools/enhance.cpp: $(NW) book/Appendix\ A/tools.nw
-		$(NW) tangle -o . "book/Appendix A/tools.nw"
-
-	tangle/build/serve: tangle/tools/serve.cpp
-		@mkdir -p $(dir $@)
-		$(CXX) $(CXXFLAGS) -pthread -o $@ $<
-
-	tangle/build/enhance: tangle/tools/enhance.cpp
-		@mkdir -p $(dir $@)
-		$(CXX) $(CXXFLAGS) -o $@ $<
-~@
-
-起服务器。依赖写成 `html tools` 而不是只看 `tools`：打开浏览器就该看到刚生成的页面，而不是上次构建的残留。
-
-端口与目录写死在这里而不是做成变量，因为这是"开发时随手一看"的场景；真要换，改这一行比记参数快。
+端口与目录写死在这里而不是做成变量，因为这是"开发时随手一看"的场景；真要换，敲 `nw watch 8001 weave`。
 
 它不自己退出——前台进程，`Ctrl+C` 结束。所以它不在 `all` 里。
 
 <<tangle/Makefile~: serve>>= @
-	serve: html tools
-		@tangle/build/serve 8000 weave
+	serve: html
+		@$(NW) watch 8000 weave
 ~@
 
 构建规则自身。正在被 make 读的文件被覆盖没问题——规则已在内存里，下一次调用才用新版本。
@@ -413,7 +397,7 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 			diff -u "$$f" "$$tmp/$$f" || ok=0; \
 		done; \
 		rm -rf "$$tmp"; \
-		if [ $$ok = 1 ]; then echo "selfhost: 七个产物逐字节一致"; else exit 1; fi
+		if [ $$ok = 1 ]; then echo "selfhost: 处理器产物逐字节一致"; else exit 1; fi
 
 ~@
 

@@ -1,12 +1,14 @@
 # 站点工具
 
-构建之外还有两件事要人做：把 `weave/` 起到一个端口上；把页面里那两样源码——`dot` 图与 TeX 公式——换成浏览器能看的东西。两件事都不属于 tangle，也不属于 weave：前者只管把 `.nw` 拼成产物，后者只管把文档排成 HTML。所以单开一篇。
+构建之外还有两件事要人做：把 `weave/` 起到一个端口上；把页面里那两样源码——`dot` 图与 TeX 公式——换成浏览器能看的东西。两件事都不属于 tangle 的算法，也不属于 weave 的排版：前者只管把 `.nw` 拼成产物，后者只管把文档排成 HTML。所以单开一篇。
+
+它们不是两个命令，而是**同一个二进制里的两个函数**。入口只有两个：`nw weave` 写完页面就地增强，`nw watch` 起服务并在源变了以后重渲染。分成两个翻译单元，是因为它们和处理器共用的东西只有 `nw.hpp` 里那几个原型；硬塞进 `weave.cpp` 只会让那个文件长出第二种职责。
 
 这一篇的用法和别篇不同：它是**工具集**，不是"一个工具的使用说明"。每个工具一节，节名就是它的工作；两个工具共享的规矩写在前面。要加第三个工具，三步：
 
 - 写一节：它为什么长成这样，比它做了什么重要；
 - 给它的每一块起名 `tangle/tools/<名字>.cpp: …`——**chunk 名里已经写好了产物路径**，不用另立一份清单；
-- 在 `tangle/Makefile` 里加一行编译、一处调用。
+- 在 `tangle/Makefile` 的 `NW_SRC`（编译）与 `PROC`（展开）里各加一处。
 
 展开、清理、漂移比对都由已有规则接住：`GENERATED` 里多一行，`verify` 就会替你盯着它有没有与 `.nw` 对齐。
 
@@ -18,7 +20,7 @@
 
 三条，两个工具都遵守。
 
-**都是产物。** 源住在这篇里，`nw tangle` 展开成 `tangle/tools/*.cpp`，make 再编成 `tangle/build/*`。手改 `.cpp` 与手改 `weave/` 里的 HTML 是同一类错误：改动活在产物里，下一次展开就没了。
+**都是产物。** 源住在这篇里，`nw tangle` 展开成 `tangle/tools/*.cpp`，再和别的翻译单元一起编进 `nw`。手改 `.cpp` 与手改 `weave/` 里的 HTML 是同一类错误：改动活在产物里，下一次展开就没了。
 
 **都是可选的。** 缺 `dot` 就保留图源，缺 `node` 就保留 TeX——书照常可读，构建不红。工具缺席是"少了一层增强"，不是"构建失败"。
 
@@ -28,26 +30,27 @@
 
 `weave/` 里是一堆静态 HTML，双击也能看，但有三个不方便：链接是相对的、刷新不会重读、每换一篇要回文件管理器里找。所以配一个几十行的静态服务器。
 
-它只做三件事：列目录、发文件、拦住越界。没有热更新、没有代理、没有压缩——那些等真需要再说。
+它自己只做三件事：列目录、发文件、拦住越界。重渲染不在这里——那是 `nw watch` 的循环在空闲时做的事，服务只管把磁盘上现在的字节发出去。
 
-为什么不用 `python3 -m http.server`？因为它会给浏览器发 `Last-Modified` 并支持条件请求，你 `make html` 之后刷新，看到的可能还是旧页面。开发工具的第一要求是"我看到的就是刚才生成的"，这一条不满足，其他都白搭。
+为什么不用 `python3 -m http.server`？因为它会给浏览器发 `Last-Modified` 并支持条件请求，页面重建之后刷新，看到的可能还是旧的。开发工具的第一要求是"我看到的就是刚才生成的"，这一条不满足，其他都白搭。
 
 #### C.1.1 参数与依赖：一个 socket，四步就位
 
 没有第三方 HTTP 库。一个静态服务器只需要四个系统调用：`socket` 造一个端点、`bind` 把它钉在地址上、`listen` 转成"排队等人连"、`accept` 从那队里取一个连接。剩下全是读写。
 
-参数仍是两个：`argv[1]` 端口、`argv[2]` 目录。C++ 的 `argv[0]` 是程序名，所以用户参数从 1 数起；两个参数不值得写参数解析器，缺省值用条件表达式给。
+参数由调用方给：端口、目录、以及"空闲时做什么"。`nw watch` 传进来的是"看一眼源文件有没有变"；不给就传空，退化成纯服务器。
 
 头文件分两组：前一组是 POSIX（socket、文件、信号），后一组是标准库。分组不是为了好看——看到第一组就知道这个程序只跑在类 Unix 上，不必假装可移植。
 
 <<tangle/tools/serve.cpp: preamble>>= @
-	// 把 weave/ 下的 HTML 起到一个端口上：tangle/build/serve [端口] [目录]
+	// 把 weave/ 下的 HTML 起到一个端口上：这是 `nw watch` 的一半。
 	//
-	// 只做三件事：列目录、发文件、拦住越界。没有热更新、没有代理、没有压缩。
-	
+	// 只做三件事：列目录、发文件、拦住越界。没有代理、没有压缩、没有 WebSocket。
+
 	#include <arpa/inet.h>
 	#include <dirent.h>
 	#include <netinet/in.h>
+	#include <poll.h>
 	#include <signal.h>
 	#include <sys/socket.h>
 	#include <sys/stat.h>
@@ -64,7 +67,9 @@
 	#include <vector>
 	
 	using namespace std;
-	
+
+	namespace nw {
+
 	static string ROOT;
 	static int PORT = 8000;
 ~@
@@ -357,9 +362,10 @@
 根目录先碾成绝对路径再进主循环：后面每次拼接都假定它没有 `.` 与 `..`，这个假定只该在一个地方成立。
 
 <<tangle/tools/serve.cpp: main>>= @
-	int main(int argc, char** argv) {
-		if (argc > 1) PORT = atoi(argv[1]);
-		const char* dir = argc > 2 ? argv[2] : "weave";
+	// 入口不是 main：这个文件编进 nw，和 weave 共用一个进程。
+	// 第三个参数是"两次请求之间做什么"——watch 用它在空闲时检查源文件有没有变。
+	int serve_run(int port, const string& dir, void (*on_idle)()) {
+		PORT = port;
 	
 		// 绝对路径：越界判断比的是前缀，相对路径里可以塞 ..，比不出来。
 		char cwd[4096];
@@ -421,7 +427,20 @@
 		printf("根目录 %s\n", ROOT.c_str());
 		fflush(stdout);
 	
+		// 有请求就接，没有就每半秒问一次 on_idle。不用 inotify，也不另起线程：
+		// "服务"和"看源文件"是同一个循环里的两件事，顺序清楚，退出也只有一处。
 		for (;;) {
+			pollfd p{srv, POLLIN, 0};
+			int r = poll(&p, 1, 500);
+			if (r < 0) {
+				if (errno == EINTR) continue;
+				perror("poll");
+				break;
+			}
+			if (r == 0) {
+				if (on_idle) on_idle();
+				continue;
+			}
 			int fd = accept(srv, nullptr, nullptr);
 			if (fd < 0) {
 				if (errno == EINTR) continue;
@@ -433,27 +452,29 @@
 		}
 		close(srv);
 		return 0;
-	}
-~@
+		}
 
-### C.2 enhance：构建末尾的两步增强
+		}  // namespace nw
+		~@
 
-`weave` 只做一件：把 `.nw` 变成 HTML。有两样东西它做不了——把 `dot` 源码画成图、把 `$…$` 排成数学。这两件事都要外部工具，所以放在构建末尾一次跑完。
+### C.2 enhance：页面写完之后的两步增强
+
+把 `.nw` 变成 HTML 之后，还有两件事：把 `dot` 源码画成图、把 `$…$` 排成数学。两件事都要外部工具，所以放在页面写完之后一次跑完——认的是 weave 自己刚写出去的那三种形状。
 
 #### C.2.1 三条约束
 
 三条约束决定了它的形状：
 
-- **weave 不 `fork` 外部命令。** 一旦它在渲染时调 `dot`，程序就依赖"这台机器装了什么"，一份 HTML 的产出取决于环境。
+- **认的形状只有三种，而且先写成常量。** `<pre class="dot">`、`<span class="math">`、`<div class="math-block">`。识别与替换必须用同一份字面量：两处各写一遍，改一处就会留下一半。
 - **缺工具不能报错。** 书还是能读，只是图和公式回到源码形态——这比"构建失败"更接近"读者要的东西还在"。
-- **一页里可能有好几张图、几十个式子。** 每张图起一个进程，构建就会慢到让人不想跑它。
+- **一页里可能有好几张图、几十个式子。** 图得一张一个进程（`dot` 一次只画一张）；公式可以攒成一批交给一个 node 进程，否则光启动就够慢。
 
 #### C.2.2 开头：要认的三样形状
 
 先把要认的标记写成常量。写成常量而不是散在代码里，是因为识别与替换必须用**同一份**字面量——两处各写一遍，改一处就会留下一半。
 
 <<tangle/tools/enhance.cpp: preamble>>= @
-	// 构建末尾的两步增强：dot 图源 → 内联 SVG，$…$ → MathML。
+	// 页面写完之后的两步增强：dot 图源 → 内联 SVG，$…$ → MathML。
 	//
 	// 两个工具都是可选的：缺 dot 就保留 <pre class="dot">，缺 katex 就保留原文。
 	// 书不会因为缺工具而构建失败——那部分只是回到源码形态。
@@ -475,7 +496,9 @@
 	#include <vector>
 	
 	using namespace std;
-	
+
+	namespace nw {
+
 	static const string SPAN_OPEN = "<span class=\"math\">";
 	static const string SPAN_CLOSE = "</span>";
 	static const string BLOCK_OPEN = "<div class=\"math-block\">";
@@ -913,9 +936,8 @@ dot 只输出一段 `<svg>`，前后还有 XML 声明与生成器注释，都丢
 只写有变化的文件：把每一页都重写一遍，等于让浏览器缓存与任何增量同步工具白做，而内容其实一个字都没变。
 
 <<tangle/tools/enhance.cpp: main>>= @
-	int main(int argc, char** argv) {
-		string root = argc > 1 ? argv[1] : "weave";
-	
+	// 入口不是 main：weave 写完页面直接调它，watch 每次重渲染也走同一条路。
+	int enhance_dir(const string& root) {
 		// 只扫一层：weave/ 里全是平铺的 HTML，没有子目录，不必递归。
 		vector<string> files;
 		if (DIR* d = opendir(root.c_str())) {
@@ -936,4 +958,6 @@ dot 只输出一段 `<svg>`，前后还有 XML 声明与生成器注释，都丢
 		printf("enhance: %zu 页\n", files.size());
 		return 0;
 	}
+
+	}  // namespace nw
 ~@

@@ -17,13 +17,15 @@
 
 tangle/main.cpp @
 
-## 一、入口：七个子命令
+## 一、入口：八个子命令
 
 三个子命令共用一个解析结果：`check` 在内存里完整展开一遍但不落盘、`tangle` 展开并写盘、`weave` 改走渲染。`check` 之所以要展开而不只解析，是因为引用类错误（未定义、循环引用、引用了落盘块）全都藏在展开阶段——只解析的"检查"会放它们过去，然后在下一个人手上炸掉。
 
 第四个是 `run`：它不在这条线上——不解析全书，只按命令表展开那一篇，然后把剩下的活交给仓库的入口。所以它单独分派，见第八节。
 
-再往后的 `init` 与 `tutorial` 也不在解析那条线上：一个只写两份文件，一个只在临时目录里读一份稿子。它们和 `run` 一样，在合并之前就分派出去——前者在第九节，后者在下一篇。
+再往后的 `init` 与 `tutorial` 也不在解析那条线上：一个只往空目录里写六份文件，一个只在临时目录里读一份稿子。它们和 `run` 一样，在合并之前就分派出去——前者在第九节，后者在下一篇。
+
+还有 `watch`：它不是第三个处理器，而是 `weave` 外面套的一层循环——渲染一次、起一个只听本机的端口、盯着 `book/` 的 mtime，变了就整站重来（第七节末尾）。它也在这条线之外：它的活是"反复 weave"，不是"这一次怎么渲染"。
 
 最后是 `version`。它存在的理由不是"完整性"：这个程序会被装进 `PATH` 当成日常工具用（`nw tangle …` 而不是 `./tangle/build/nw tangle …`），而 `PATH` 里躺着的二进制必须能自报身份——否则"我装的是哪个版本"只能靠猜。`--version` 与 `-V` 是它的别名，`--help` 是用法串的别名。
 
@@ -35,6 +37,12 @@ tangle/main.cpp @
 
 << prologue >>= @
 	#include "nw.hpp"
+
+	// init 写出的六份模板。单独一个头文件：它们是文案，不是这一章的算法，
+	// 混进 main.cpp 会把命令行淹掉；而且改文案只需重展这一篇。
+	#include "templates.hpp"
+
+	#include <climits>
 
 	namespace nw {
 
@@ -64,6 +72,7 @@ tangle/main.cpp @
 		          << "  nw tutorial\n"
 		          << "  nw tangle   [--debug] [-o 目录] 源.nw [更多.nw …]\n"
 		          << "  nw weave    [--book 书目录] [-o 目标] [源.nw …]\n"
+		          << "  nw watch    [端口] [目录]\n"
 		          << "  nw check    源.nw [更多.nw …]\n"
 		          << "  nw run      [名字]\n"
 		          << "  nw version | --version | -V\n"
@@ -194,6 +203,12 @@ tangle/main.cpp @
 
 参数不合法时抛 `Error` 而不是返回 2：调用方只有一处，抛出去由最外层统一打印，省掉一条重复的错误格式。
 
+### 7.1 页面写完就地增强
+
+落盘之后还有两件事：`dot` 围栏要画成 SVG，公式要换成 MathML。这两件事由 `weave` 自己收尾——它刚写完这些页面，认识自己写出去的三种形状，不必再由另一个进程回头把 HTML 逐页扫一遍。
+
+依赖方向没有被破坏：`weave` 本来就在写文件；缺 `dot`、缺 `node` 时增强退回源码形态，构建照样通过。
+
 << cmd-weave >>= @
 	// weave：给 .html 目标是单页，给目录是整个站点。
 	static int cmd_weave(const vector<Document>& docs, const Args& a, const vector<string>& parts) {
@@ -207,7 +222,95 @@ tangle/main.cpp @
 			std::cout << "写出 " << a.target << "\n";
 			return 0;
 		}
-		return write_site(docs, pages_of(docs, a.inputs, parts), a.target);
+		int rc = write_site(docs, pages_of(docs, a.inputs, parts), a.target);
+		// 刚写完就增强：图与公式不必等下一次构建，也就没有"页面落后于源"的中间态。
+		if (rc == 0) enhance_dir(a.target);
+		return rc;
+	}
+
+~@
+
+### 7.2 watch：源变了就重来
+
+`nw watch` 是 `weave` 外面套的一层循环：渲染一次、起端口、每半秒看一遍 `book/` 下最新的 mtime，比上次新就整站重来。
+
+不解析依赖是有意的：整站渲染 0.4 秒，"改了哪一篇、谁引用了它"这笔账算下来比省掉的时间贵，而且算错一次就让人对着旧页面改。
+
+改坏一页不该让服务退出。渲染失败只把错误打出来，端口继续守着——正在写的那一页通常是半成品，这时候退出等于把人赶出预览。
+
+<< cmd-watch >>= @
+	// 整站重渲染时记的两个量：落到哪个目录、上次见到的 mtime。
+	static string WATCH_DIR;
+	static long long WATCH_SEEN = 0;
+
+	// book/ 下最新的 mtime。只看 .nw：目录章的产物由 make 重展，不归 watch 管。
+	// 初值不能用 0 当"没扫到"：`file_time` 的纪元不是 Unix 纪元，libstdc++ 下这个计数是负数。
+	static long long newest_source_time() {
+		long long newest = LLONG_MIN;
+		std::error_code ec;
+		const auto end = std::filesystem::recursive_directory_iterator();
+		for (auto it = std::filesystem::recursive_directory_iterator("book", ec); !ec && it != end;
+		     it.increment(ec)) {
+			if (!it->is_regular_file(ec)) { ec.clear(); continue; }
+			string p = it->path().string();
+			if (p.size() < 3 || p.compare(p.size() - 3, 3, ".nw") != 0) continue;
+			auto t = std::filesystem::last_write_time(it->path(), ec);
+			if (ec) { ec.clear(); continue; }
+			long long v = static_cast<long long>(t.time_since_epoch().count());
+			if (v > newest) newest = v;
+		}
+		return newest;
+	}
+
+	// 一次整站重渲染。先删目标目录：删掉一篇之后，旧页面不该继续躺在那里——那不是"过期"，是"不存在"。
+	static void render_all() {
+		// 先记下这次看到的状态：渲染失败时也记，否则半成品会让它每半秒重试一次，把终端刷满。
+		WATCH_SEEN = newest_source_time();
+		try {
+			Book b = read_book(DEFAULT_BOOK);
+			vector<string> inputs, parts;
+			for (const auto& bp : book_pages(b)) {
+				inputs.push_back(bp.path);
+				parts.push_back(bp.part);
+			}
+			if (inputs.empty()) throw Error(DEFAULT_BOOK, 0, "书目录里一页都没有");
+			vector<Document> docs;
+			for (const auto& f : inputs) docs.push_back(parse(read_file(f), f));
+			std::filesystem::remove_all(WATCH_DIR);
+			if (write_site(docs, pages_of(docs, inputs, parts), WATCH_DIR) != 0)
+				throw Error(WATCH_DIR, 0, "写站失败");
+			enhance_dir(WATCH_DIR);
+		} catch (const std::exception& e) {
+			// 半成品也要能预览：错打在终端上，服务不退出。
+			std::cerr << e.what() << "\n";
+		}
+	}
+
+	// 服务空闲时被调用：源比上次新才动。渲染期间改过的文件会让下一轮再触发一次，
+			// 这比"漏掉一次改动"好。
+	static void watch_idle() {
+		if (newest_source_time() <= WATCH_SEEN) return;
+		std::cout << "源变了，重渲染…\n";
+		std::cout.flush();
+		render_all();
+	}
+
+	// 参数只有两个，都可以省：端口、目录。
+	static int cmd_watch(const Args& a) {
+		int port = 8000;
+		if (!a.inputs.empty()) {
+			try {
+				port = std::stoi(a.inputs[0]);
+			} catch (const std::exception&) {
+				throw Error("<watch>", 0, "端口不是数字：" + a.inputs[0]);
+			}
+		}
+		// 目录既可以从 `-o` 来，也可以是第二个位置参数：解析器会把"最后一个非 .nw"当成目标。
+	WATCH_DIR = !a.target.empty() ? a.target : (a.inputs.size() > 1 ? a.inputs[1] : "weave");
+		render_all();
+		std::cout << "watch：http://localhost:" << port << "/（Ctrl+C 退出）\n";
+		std::cout.flush();
+		return serve_run(port, WATCH_DIR, watch_idle);
 	}
 
 ~@
@@ -312,66 +415,47 @@ tangle/main.cpp @
 
 `init` 是唯一一个"不读输入、只写文件"的子命令。它要解决的问题很具体：装好 `nw` 之后，一个还不懂 `<< 名字 >>= @` 的人，怎么在五分钟里看到自己的第一份产物。
 
-答案是两份能跑的东西：`main.nw` 和 `Makefile`。前者是一篇能 tangle 的稿子，后者只有两条规则——展开、编译运行。内容编进二进制：骨架该随程序一起走，不该要求先联网、先读这本书。
+答案是六份文件：一篇能 tangle 的稿子、一条展开再编译的规则，外加给接手者的四份契约。为什么是六份而不是两份，写在第六章（`[[init.nw]]`）——那些缺口，比如新项目里没有命令表、没有写作约定，都是长出第一篇之后才显形的。
 
-写入前先看同名文件在不在：初始化只该发生在空处，覆盖等于悄悄毁掉别人的稿子。
+这一节只管调度：往哪写、写不写、写到哪停。模板内容一个字也不在这儿——它们在 `tangle/templates.hpp`，由那一节展开，和别的产物一样编进二进制。骨架该随程序一起走，不该要求先联网、先读这本书；但骨架的源头仍是书，不是二进制里的字节。
 
-`Makefile` 只调 `nw tangle`，不调 `nw weave`：先让人看到"源变成产物"，再谈网页。
+两件事要守。第一，写入前把六份全查一遍，不只查正要写的那份：初始化只该发生在空处，覆盖等于悄悄毁掉别人的稿子；而写到一半才发现冲突，留下的是一个半成品目录，比直接失败更难收拾。第二，查完再写，中间不给人插手的余地——这版假设"要么全成、要么整个程序失败"。
 
-篇幅说明：`main.nw` 里含 `<<`，直接写进块体，解析器会把它当成嵌套的块头。所以下面用围栏把整段内容包起来——栏本身不落盘，栏内原样（见 S1.3）。
+六份装进一张表，不是六个 `if`：路径与内容一一对应，加一份、删一份都只动一行，而"先查后写"两遍循环也只写一遍。字段起名字而不是用 `pair`，是因为这张表是给人读的——哪个是路径、哪个是内容，不该靠位置去猜。
+
+`Makefile` 的默认目标只调 `nw tangle`，`html` 目标才调 `nw weave`：先让人看到"源变成产物"，再谈网页。
 
 << cmd-init >>= @
-	// 骨架编进二进制：新用户不该先读这本书才知道语法。
-	// 围栏只在这里当"引号"用：栏内的 << 不是这一章的块。
-	static const char* INIT_NW = R"NW(# 我的第一篇
-	```
-
-	这一页既是文档，也是源码：`nw tangle` 把下面的块展开成 `tangle/hello.c`。
-
-	<<tangle/hello.c: includes>>= @
-		#include <stdio.h>
-	~@
-
-	<<tangle/hello.c: main>>= @
-		int main(void) {
-			printf("hello, nw\n");
-			return 0;
-		}
-	~@
-	```
-	)NW";
-
-	static const char* INIT_MAKEFILE = R"MK(NW ?= nw
-
-	all: run
-
-	# 展开：.nw → tangle/hello.c。只有改了 .nw 才重展。
-	tangle/hello.c: main.nw
-		@$(NW) tangle -o . main.nw
-
-	run: tangle/hello.c
-		cc -std=c99 -Wall -Wextra -o tangle/hello tangle/hello.c
-		@./tangle/hello
-
-	clean:
-		rm -rf tangle
-	)MK";
-
 	// init：给一个空目录装上能跑的最小骨架。目录可以还不存在。
 	static int cmd_init(const Args& a) {
 		string dir = a.inputs.empty() ? "." : a.inputs.front();
+		// 六份产物与模板一一对应：加一份、换一句文案，都只改这张表。
+		// 字段有名字而不是用 pair：这张表是给人读的，"哪个是路径"不该靠位置猜。
+		struct Skeleton {
+			const char* path;
+			const char* text;
+		};
+		static const Skeleton files[] = {
+		    {"main.nw", INIT_MAIN_NW},
+		    {"Makefile", INIT_MAKEFILE},
+		    {"AGENT.md", INIT_AGENT_MD},
+		    {"tangle/command.yaml", INIT_COMMANDS},
+		    {"skills/nw-structure.md", INIT_SKILL_STRUCTURE},
+		    {"skills/nw-prose.md", INIT_SKILL_PROSE},
+		};
 		std::filesystem::create_directories(dir);
-		string page = dir + "/main.nw";
-		string make = dir + "/Makefile";
-		// 不覆盖：初始化只该在空处发生。
-		for (const string& p : {page, make}) {
-			std::ifstream probe(p);
-			if (probe) throw Error(p, 0, "已存在，不覆盖；换一个目录，或先删掉它");
+		// 不覆盖：初始化只该在空处发生。先查全，再写第一个字节。
+		for (const auto& f : files) {
+			string p = dir + "/" + f.path;
+			if (std::ifstream(p)) throw Error(p, 0, "已存在，不覆盖；换一个目录，或先删掉它");
 		}
-		write_file(page, INIT_NW);
-		write_file(make, INIT_MAKEFILE);
-		std::cout << "已生成 " << page << "、" << make << "\n"
-		          << "接着：cd " << dir << " && make\n";
+		// write_file 会顺手建父目录，所以 tangle/ 与 skills/ 不必单独 mkdir。
+		for (const auto& f : files) {
+			string p = dir + "/" + f.path;
+			write_file(p, f.text);
+			std::cout << "已生成 " << p << "\n";
+		}
+		std::cout << "接着：cd " << dir << " && make\n";
 		return 0;
 	}
 
@@ -423,6 +507,8 @@ tangle/main.cpp @
 		// init 与 tutorial 连源都不要：它们自己知道要写什么、要看什么。
 		if (a.cmd == "init") return cmd_init(a);
 		if (a.cmd == "tutorial") return cmd_tutorial(a);
+		// watch 自己读书目录、自己起服务，不进下面那条"解析 → 合并 → 分派"的线。
+		if (a.cmd == "watch") return cmd_watch(a);
 
 		// weave 有三种情形：单页、按书目录出站点（缺省）、显式 --files 按命令行出站点。
 		vector<string> parts;

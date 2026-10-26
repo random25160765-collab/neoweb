@@ -49,6 +49,10 @@ roff 是排版语言，不是 Markdown：`.SH` 起节、`.TP` 起条目、`.B`/`
 	.IR 目标 ]
 	.RI [ 源.nw …]
 	.br
+	.B nw watch
+	.RI [ 端口 ]
+	.RI [ 目录 ]
+	.br
 	.B nw check
 	.I 源.nw
 	.RI [ 更多.nw …]
@@ -71,7 +75,8 @@ roff 是排版语言，不是 Markdown：`.SH` 起节、`.TP` 起条目、`.B`/`
 	.TP
 	.B init
 	.na
-	在当前目录（或给定目录）写下 \fImain.nw\fP 与 \fIMakefile\fP 两份能跑的骨架。已有同名文件时不覆盖。
+	在当前目录（或给定目录）写下六份文件：\fImain.nw\fP、\fIMakefile\fP、\fIAGENT.md\fP、
+	\fItangle/command.yaml\fP 与 \fIskills/\fP 下的两份写作细则。已有同名文件时不覆盖。
 	.TP
 	.B tutorial
 	.na
@@ -83,7 +88,11 @@ roff 是排版语言，不是 Markdown：`.SH` 起节、`.TP` 起条目、`.B`/`
 	.TP
 	.B weave
 	.na
-	渲染。缺省按书目录出整站；\fB\-o\fP 的目标以 \fI.html\fP 结尾时只渲那一页；\fB\-\-files\fP 按命令行顺序出站。
+	渲染。缺省按书目录出整站；\fB\-o\fP 的目标以 \fI.html\fP 结尾时只渲那一页；\fB\-\-files\fP 按命令行顺序出站。写完就地增强：\fIdot\fP 图变成内联 SVG，公式换成 MathML，缺工具时退回源码形态。
+	.TP
+	.B watch
+	.na
+	渲染整站，起一个只听本机的静态服务，然后盯着 \fIbook/\fP 下最新的 mtime：比上次新就整站重渲染。缺省 8000 端口、服务 \fIweave/\fP。前台运行，Ctrl\-C 退出。
 	.TP
 	.B check
 	.na

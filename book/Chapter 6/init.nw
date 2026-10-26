@@ -1,0 +1,201 @@
+# 初始化：一个空目录该有什么
+
+`nw init` 是唯一一个不读输入、只写文件的子命令。它要解决的问题很具体：装好工具之后，一个还不懂 `<< 名字 >>= @` 的人，怎么在五分钟里看到自己的第一份产物；以及，一个不懂这套语法的 agent，怎么在同一个目录里接着写。
+
+这两个问题不是同一个。人需要一条能跑起来的路，agent 需要一份**不需要先读这本书**的语法说明。所以 `init` 写出来的东西分成两类：能跑的最小骨架，和给接手者看的契约。
+
+## 一、为什么不再是两个文件
+
+最早只有 `main.nw` 与 `Makefile`：一篇能 tangle 的稿子，一条展开再编译的规则。够跑，但跑完就断了——
+
+新项目里没有命令表，`nw run` 无从知道"这个项目里能跑什么"；没有写作约定，agent 会用注释代替散文、把两百行塞进一个块，而没有任何东西提示它这样做是错的。这些缺口在长出第一篇之后才显形，代价是重写。
+
+所以现在写六份：`main.nw`、`Makefile`、`AGENT.md`、`tangle/command.yaml`、`skills/nw-structure.md`、`skills/nw-prose.md`。
+
+## 二、command.yaml 是控制面的透传
+
+`nw run` 不知道 `make` 存在，它只按一张表把"名字"换成"入口"。表在新项目里必须有，否则那条命令只能列出一片空白。
+
+放 `tangle/command.yaml` 而不是仓库根：路径与这本书自己的一致，`nw run` 的缺省值就写在代码里，不必每个项目各约定一次。
+
+表里只登记薄薄一层"名字 → 入口"，编译细节留给 `Makefile`——那本来就是一个正常 repo 该说的话，抄一遍到书里只会多一份会过期的东西。
+
+## 三、AGENT.md 是给谁的
+
+给一个刚进这个目录、只知道自己是"写代码的"的 agent。
+
+它不会先读这本书，也不该被要求读完。它需要的是：四个记号、落盘顺序由谁决定、写完必做哪三条命令、有哪些常见报错、以及"散文也是交付物"这一条。够它写出第一篇不丢人东西。
+
+人不必读它。人读的是 `main.nw` 里的散文。
+
+## 四、skills 是把纪律带进项目
+
+`AGENT.md` 只能说到"别把长代码塞进一个块"，说不清为什么。两份 skill 接着往下讲：一份讲装配（一块一次讲解、清单定顺序、什么时候停下来问人），一份讲句子（先让人愿意读、结论要有来路、两类冗余只删一类）。
+
+它们不是这本书的复制品：书里的例子都指着这本书自己的源码，新项目里没有那些东西。模板是删掉例子、留下判据的版本。
+
+## 五、模板也要能被重新生成
+
+六份内容都是 C++ 里的原文字符串，编进二进制——安装后的工具要能在一个空目录里立刻工作，不能回头去仓库里找模板。它们的源头都在书里，和别的产物一样由 tangle 展开：四份在这一篇，两份 skill 在写它们的那两篇。
+
+这一篇的产物是一个头文件，`tangle/templates.hpp`，`main.cpp` 直接包含。改一句文案，改的是这一处源，不是二进制里的字节。
+
+下面是六份模板，六份各占一块：一块就是一次讲解，读的人不必翻过前一份才知道下一份从哪里开始。`<< templates.hpp >>` 只摆顺序——包括从隔壁两篇引来的那两块。
+
+其中两块要用围栏护住：`main.nw` 的正文里有行首的 `<<tangle/hello.c: …>>= @`，`AGENT.md` 的正文里有语法示例，不护就会被这一章当成块头读走。四个反引号的栏内一切都是字面，栏本身不落盘。
+
+tangle/templates.hpp @
+
+<< templates.hpp >>= @
+	// `nw init` 写出的六份文件。全部编进二进制：安装后的工具不依赖仓库，
+	// 但源头仍是这本书——改文案改这一节，改完重新展开。
+
+	<< template-main-nw >>
+
+	<< template-makefile >>
+
+	<< template-commands >>
+
+	<< template-agent-md >>
+
+	<< template-skill-structure >>
+
+	<< template-skill-prose >>
+~@
+
+<< template-main-nw >>= @
+	````
+	static const char* INIT_MAIN_NW = R"NW(# 我的第一篇
+
+	这一页既是文档，也是源码：`nw tangle` 把下面的块展开成 `tangle/hello.c`。
+
+	给 agent 的语法与纪律在 `AGENT.md`；两份细则在 `skills/`。
+
+	<<tangle/hello.c: includes>>= @
+		#include <stdio.h>
+	~@
+
+	<<tangle/hello.c: main>>= @
+		int main(void) {
+			printf("hello, nw\n");
+			return 0;
+		}
+	~@
+	)NW";
+	````
+~@
+
+<< template-makefile >>= @
+	static const char* INIT_MAKEFILE = R"MK(NW ?= nw
+
+	all: run
+
+	# 展开：.nw → tangle/hello.c。只有改了 .nw 才重展。
+	tangle/hello.c: main.nw
+		@$(NW) tangle -o . main.nw
+
+	run: tangle/hello.c
+		cc -std=c99 -Wall -Wextra -o tangle/hello tangle/hello.c
+		@./tangle/hello
+
+	# 网页：一份自包含 HTML，双击就能看。
+	html: main.nw
+		@$(NW) weave -o main.html main.nw
+
+	clean:
+		rm -rf tangle main.html
+
+	.PHONY: all run html clean
+	)MK";
+~@
+
+<< template-commands >>= @
+	static const char* INIT_COMMANDS = R"CMD(# 这个项目里能跑什么。一条三行：名字、源（先展开这一篇；不需要就不写）、入口。
+	# `nw run` 读这张表；所以"能跑什么"与项目里写着什么只有一份事实。
+
+	- name: all
+	  run: make all
+
+	- name: run
+	  run: make run
+
+	- name: html
+	  run: make html
+
+	- name: clean
+	  run: make clean
+	)CMD";
+~@
+
+<< template-agent-md >>= @
+	````
+	static const char* INIT_AGENT_MD = R"AG(# 在这个项目里写 .nw
+
+	一份 `.nw` 既是文档，也是源码：`nw tangle` 把它展开成代码，`nw weave` 把它排成网页。
+	散文给人读，块变成代码。**两边都是交付物。**
+
+	## 四个记号
+
+	```
+	<<tangle/hello.c: main>>= @      定义一块：产物路径 + 名字
+		int main(void) {             块体缩进一格
+			return 0;
+		}
+	~@                               收尾
+
+	<< main >>                       引用：把另一块贴到这里
+	```
+
+	- `文件.c @` 开一个命名空间：这一篇里所有块按文档顺序落进这个文件，`~@` 关闭。
+	- `%%…%%` 是注释：解析时挖掉，不落盘，也不进网页。
+	- 围栏里的 `<<`、`~@`、`%%` 都是字面，不解析——要展示语法就用围栏。
+
+	## 顺序
+
+	**文档顺序就是落盘顺序。** 要让函数 B 出现在 A 前面，把 B 的块挪到前面；
+	不要在代码里补前置声明去迁就顺序——那是把结构问题写进产物。
+
+	## 写完必做三件事
+
+	```
+	nw check main.nw          # 只解析 + 展开，不写盘；引用错了这里就报
+	nw tangle -o . main.nw    # 看产物，比读散文可靠
+	nw run                    # 列出命令表；nw run <名字> 执行
+	```
+
+	## 写作纪律
+
+	- 一个块装一次讲解。块名说不出角色，就是里面装了两样东西，拆。
+	- 散文在前，块在后。散文回答：为什么需要它、输入输出是什么、该注意哪一处。
+	- 产物里不留自我标注（"由 xxx 生成""请勿手改"）。产物就是产物。
+	- 散文与代码的信息差，就是这篇文档存在的理由——不要用中文把代码再念一遍。
+
+	细则见 `skills/nw-structure.md`（怎么切块、怎么组装）与 `skills/nw-prose.md`（句子怎么写）。
+
+	## 常见报错
+
+	| 消息 | 原因 |
+	|---|---|
+	| `未定义的 chunk：x` | 名字拼错，或压根没定义 |
+	| `只声明没有定义：x` | 提到过但没有 `>>=` 体 |
+	| `chunk 循环引用` | a 引 b，b 又引 a |
+	| `块体没有闭合（缺少 }）` | 花括号不配平，字符串里的 `}` 不算 |
+	| `围栏没有闭合` | 块体里的围栏忘了收 |
+
+	## 底下的工具
+
+	`nw watch` 起本地预览（8000 端口），改了 `.nw` 自动重渲染；`nw run` 走 `tangle/command.yaml`；
+	`man nw` 是完整手册。
+	)AG";
+	````
+~@
+
+~@
+
+两个 `~@` 不是笔误：一个关 `template-agent-md` 那块，一个关命名空间。`tangle/templates.hpp @` 圈的是整个产物的落盘范围，这一篇的五个块都落在里面，落盘顺序由顶上那份清单决定。
+
+六份模板都以 `R"XX(` 开头、` )XX"` 收尾，定界符各不相同：正文里有括号、有反引号、有中文标点，统一用圆括号最容易撞上。
+
+怎么把它们写进目录、碰到同名文件怎么办，归命令行那一层管（`[[cli.nw]]`）；这一篇只负责这些字节长什么样。
+
+→ 下一篇讲编辑器里那一层：[[plugin.nw]]

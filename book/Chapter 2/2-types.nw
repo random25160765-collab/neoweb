@@ -234,6 +234,11 @@ tangle/nw.hpp @
 	Book read_book(const string& path);
 	vector<BookPage> book_pages(const Book& b);
 
+	// ---- 站点工具（serve.cpp / enhance.cpp）----
+	// 两个文件都编进 nw：weave 写完页面直接增强，watch 用这两个函数把"重渲染 + 服务"串起来。
+	int enhance_dir(const string& dir);
+	int serve_run(int port, const string& dir, void (*on_idle)());
+
 	// ---- 命令行（main.cpp）----
 	int run(int argc, char** argv);
 ~@

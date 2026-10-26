@@ -47,9 +47,6 @@
 	- name: grammar
 	  run: make grammar
 
-	- name: tools
-	  run: make tools
-
 	- name: serve
 	  run: make serve
 
