@@ -37,7 +37,7 @@ digraph layers {
 
 两个产物目录不是两条独立的路：`weave/` 里的每一页，都是那个二进制读同一份 `.nw` 之后的输出。所以 `book/*.nw` 有两条出边——同一份源，两种读者。
 
-`book/` 是唯一不落产物的目录：书的目录写在 `book/menu.nw` 的正文里，由 `nw tangle` 抽到 `tangle/tools/book.yaml` 给 `nw weave` 读。它和别的产物一样不入库——目录是书的一篇，不是书旁边另放的一份数据，也不该占着书目录里的一个位置。所以"源"与"产物"仍然只在 `ls` 一层就能分开。
+`book/` 是唯一不落产物的目录：书的目录写在 `book/menu.nw` 的正文里，由 `nw tangle` 抽到 `tangle/book.yaml` 给 `nw weave` 读。它和别的产物一样不入库——目录是书的一篇，不是书旁边另放的一份数据，也不该占着书目录里的一个位置。所以"源"与"产物"仍然只在 `ls` 一层就能分开。
 
 一开始我把 `tangle/` 判成"入库、可 diff"，理由是"它才是被运行的东西"。那个理由站不住：凡是能从 `.nw` 重建的东西，入库就等于**同一个事实存了两份**，而两份迟早会不一致。可审的不是副本，是 `.nw` 本身。
 
@@ -59,7 +59,7 @@ digraph layers {
 
 `LICENSE` 不需要这条理由：它不是被生成的，是被选择的——约束"谁能用、以什么条件用"，不参与构建。项目取 GPL-3.0-or-later，而渲染后端要链的 GNU Source-highlight 是 GPL-3（或更高）；or-later 允许降级到第 3 版分发，所以两者相容，不必为此绕开许可。
 
-**关键是它们会退休。** 二进制编出来之后 `make install` 把 `nw` 装进 `~/.local/bin`（已在 `PATH` 上），此后日常只敲：
+**关键是它们会退休。** 二进制编出来之后 `make install` 把 `nw` 装进 `~/.local/bin`，顺便把这个目录补进 `PATH`，此后日常只敲：
 
 ```
 nw tangle "book/Appendix B/hello.nw" .           # 改完 .nw，重出产物
@@ -101,7 +101,7 @@ nw check sort.nw    # 试试手
 
 `all` 是默认目标，顺序不能换：先有 `nw`，才谈得上用它生成插件、构建规则和语法。
 
-`install` 把二进制装进 `PREFIX/bin`（默认 `~/.local/bin`）并当场跑一次 `nw version`：装完就该能自报身份，否则"我装的是哪个版本"只能靠猜。
+`install` 把二进制装进 `PREFIX/bin`（默认 `~/.local/bin`）、man 页装进 `PREFIX/share/man`，`PATH` 里没有它就补进 shell 启动文件，最后当场跑一次 `nw --version`：装完就该能自报身份，否则"我装的是哪个版本"只能靠猜。
 
 `html` 把顶层所有 `.nw` 各 weave 一遍，产物按同名落到 `weave/`。它进 `all`，因为"书能读"是构建结果的一部分。
 
@@ -169,7 +169,7 @@ nw check sort.nw    # 试试手
 	# 处理器的源码分散在五章里：条款、类型、工具、解析（第 2 章）、tangle（第 3 章）、
 	# weave（第 4 章）、tutorial 与命令行（第 5 章）、两份写作规范与 init 的模板（第 6 章）。
 	# tangle 时按这个顺序合并——顺序就是 C++ 里"先声明后使用"的顺序。
-	# 语法篇要产契约测试（tangle/tests/test_spec.py），所以在清单里。
+	# 语法篇要产契约测试（tangle/test_spec.py），所以在清单里。
 	# 命令表不在清单里：它是附录 A 控制面的产物，不由这本书的程序产出。
 	# 引号形态给 shell，反斜杠形态给 make 的依赖行，两者不能混。
 	PROC = "book/Chapter 2/1-syntax.nw" "book/Chapter 2/2-types.nw" "book/Chapter 2/3-util.nw" "book/Chapter 2/4-parse.nw" "book/Chapter 3/tangle.nw" "book/Chapter 4/1-markdown.nw" "book/Chapter 4/2-render.nw" "book/Chapter 4/3-site.nw" "book/Chapter 4/4-book.nw" "book/Chapter 5/tutorial.nw" "book/Chapter 5/cli.nw" "book/Chapter 6/skills/1-structure.nw" "book/Chapter 6/skills/2-prose.nw" "book/Chapter 6/init.nw" "book/Appendix A/tools.nw"
@@ -178,20 +178,20 @@ nw check sort.nw    # 试试手
 	# 头文件一份是模块边界，一份是 init 写出的模板（文案）。
 	# 编译命令与依赖都用这份清单，加文件只改这一行。
 	NW_SRC = tangle/util.cpp tangle/parse.cpp tangle/tangle.cpp tangle/weave.cpp \
-	         tangle/main.cpp tangle/tools/serve.cpp tangle/tools/enhance.cpp
+	         tangle/main.cpp tangle/serve.cpp tangle/enhance.cpp
 	NW_HDR = tangle/nw.hpp tangle/templates.hpp
 
 ~@
 
 次生产物清单。`verify` 拿它逐字节对账，`scratch` 拿它清理。清单是手写的而不是 glob 出来的："哪些文件是产物"要人来判断，通配只能猜。`tangle/hello.c` 那几份也不在册——它们只由 `make examples` 产生，记进来就等于强迫每次对账前先跑一遍示例。
 
-`tangle/tools/book.yaml` 在册，理由和别的产物一样：它是目录章的展开结果，手改它等于把改动丢在产物里，下一次 tangle 就没了。
+`tangle/book.yaml` 在册，理由和别的产物一样：它是目录章的展开结果，手改它等于把改动丢在产物里，下一次 tangle 就没了。
 
 <<tangle/Makefile~: products>>= @
 	# 次生产物清单（全部不入库）。
 	# 注意不含 tangle/*.c：那是示例产物，只有 make examples 才会生成；
 	# 把它们记进这份账，等于要求每次 verify 之前先跑一遍示例。
-	GENERATED = tangle/tools/book.yaml \
+	GENERATED = tangle/book.yaml \
 	            tangle/nw.hpp \
 	            tangle/templates.hpp \
 	            tangle/util.cpp \
@@ -215,9 +215,9 @@ nw check sort.nw    # 试试手
 	            tangle/Makefile \
 	            tangle/command.yaml \
 	            tangle/nw.1 \
-	            tangle/tools/serve.cpp \
-	            tangle/tools/enhance.cpp \
-	            tangle/tests/test_spec.py
+	            tangle/serve.cpp \
+	            tangle/enhance.cpp \
+	            tangle/test_spec.py
 
 	.PHONY: all nw install plugin deps build-files grammar html serve ext vsix selfhost crosscheck examples hello pair fragment sort check test verify scratch clean
 
@@ -232,7 +232,7 @@ nw check sort.nw    # 试试手
 
 每篇渲染一份 HTML 到 `weave/`，文件名取 `.nw` 基名。先 `rm -rf weave`：删掉一篇后，旧 HTML 不该继续留在那里——那不是"过期"，是"不存在"。
 
-目录也在这一步之前长出来：`tangle/tools/book.yaml` 是 `book/menu.nw` 的产物，规则和别的 tangle 目标一样。写在这条 `html` 规则旁边，是因为 HTML 是它唯一的消费者——`nw weave` 靠它排页。
+目录也在这一步之前长出来：`tangle/book.yaml` 是 `book/menu.nw` 的产物，规则和别的 tangle 目标一样。写在这条 `html` 规则旁边，是因为 HTML 是它唯一的消费者——`nw weave` 靠它排页。
 
 渲染之后还有一步增强：`dot` 图源变成 SVG、`$…$` 变成 MathML。它由 `weave` 在写完页面之后自己调用，不再另起一个进程回头扫 HTML——那三种形状（`<pre class="dot">`、`<span class="math">`、`<div class="math-block">`）本来就是 weave 自己写出去的，认它们的人却住在另一个二进制里，改一处忘一处就是"页面偶尔画不出图"，而且不报错。
 
@@ -242,12 +242,12 @@ nw check sort.nw    # 试试手
 	# 全书各篇各渲染一份 HTML 到 weave/，文件名取 .nw 的基名（chapter 目录不进入名字）
 	# 先清空 weave/：删掉一篇后，旧的 HTML 不该继续躺在那里——那不是"过期"，是"不存在"。
 	# 增强在 nw weave 里自己收尾，这条规则不必再跟一个进程。
-	html: $(NW) tangle/tools/book.yaml
+	html: $(NW) tangle/book.yaml
 		@rm -rf weave && mkdir -p weave
 		@$(NW) weave -o weave
 
 	# 目录：目录章展开出 book.yaml。
-	tangle/tools/book.yaml: $(NW) book/menu.nw
+	tangle/book.yaml: $(NW) book/menu.nw
 		$(NW) tangle -o . book/menu.nw
 
 ~@
@@ -256,7 +256,7 @@ nw check sort.nw    # 试试手
 
 <<tangle/Makefile~: bootstrap>>= @
 	# 第一步：用元层的种子展开一次，得到 C++ 源码与契约测试（此刻还没有 $(NW)）
-	$(NW_SRC) $(NW_HDR) tangle/tests/test_spec.py: book/Chapter\ 2/1-syntax.nw book/Chapter\ 2/2-types.nw book/Chapter\ 2/3-util.nw book/Chapter\ 2/4-parse.nw book/Chapter\ 3/tangle.nw book/Chapter\ 4/1-markdown.nw book/Chapter\ 4/2-render.nw book/Chapter\ 4/3-site.nw book/Chapter\ 4/4-book.nw book/Chapter\ 5/tutorial.nw book/Chapter\ 5/cli.nw book/Chapter\ 6/skills/1-structure.nw book/Chapter\ 6/skills/2-prose.nw book/Chapter\ 6/init.nw book/Appendix\ A/tools.nw bootstrap.py
+	$(NW_SRC) $(NW_HDR) tangle/test_spec.py: book/Chapter\ 2/1-syntax.nw book/Chapter\ 2/2-types.nw book/Chapter\ 2/3-util.nw book/Chapter\ 2/4-parse.nw book/Chapter\ 3/tangle.nw book/Chapter\ 4/1-markdown.nw book/Chapter\ 4/2-render.nw book/Chapter\ 4/3-site.nw book/Chapter\ 4/4-book.nw book/Chapter\ 5/tutorial.nw book/Chapter\ 5/cli.nw book/Chapter\ 6/skills/1-structure.nw book/Chapter\ 6/skills/2-prose.nw book/Chapter\ 6/init.nw book/Appendix\ A/tools.nw bootstrap.py
 		$(PYTHON) bootstrap.py -o . $(PROC)
 
 ~@
@@ -291,7 +291,11 @@ nw check sort.nw    # 试试手
 
 ~@
 
-装进 `PATH` 与 manpath。之后元层退休：日常敲 `nw` 与 `man nw`，不再经过 make。末尾那句自检是因为最常见的故障不是编译失败，而是装好了却不在 `PATH` 上。
+装进 `PATH` 与 manpath。之后元层退休：日常敲 `nw` 与 `man nw`，不再经过 make。
+
+`PATH` 里没有它就替人写进去：按 `$SHELL` 挑启动文件（zsh 写 `~/.zshrc`、bash 写 `~/.bashrc`、其余写 `~/.profile`），只添一行 `export PATH="…:$PATH"`，同样的行已经在了就不再写第二遍。这件事本该由安装动作自己做完——`~/.local/bin` 不在多数发行版的默认 `PATH` 上，提示一句"你自己加"等于把故障留给人，而那故障的表现是"装好了，敲 `nw` 却说不认识"。
+
+末尾那句是最后一道：装完当场跑一次 `$(BINDIR)/nw --version`，跑得起来才算装上了。
 
 man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装的时候一起走。
 
@@ -306,7 +310,19 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 		@install -m 755 $(NW) $(BINDIR)/nw
 		@install -m 644 tangle/nw.1 $(MANDIR)/nw.1
 		@echo "已安装 $(BINDIR)/nw 与 $(MANDIR)/nw.1"
-		@case ":$$PATH:" in *":$(BINDIR):"*) ;; *) echo "注意：$(BINDIR) 不在 PATH 上，需要加进去";; esac
+		@case ":$$PATH:" in \
+		*":$(BINDIR):"*) echo "PATH 里已有 $(BINDIR)" ;; \
+		*) \
+			rc=$$(case "$${SHELL##*/}" in zsh) echo "$$HOME/.zshrc" ;; bash) echo "$$HOME/.bashrc" ;; *) echo "$$HOME/.profile" ;; esac); \
+			line="export PATH=\"$(BINDIR):\$$PATH\""; \
+			if grep -qF "$$line" "$$rc" 2>/dev/null; then \
+				echo "$$rc 里已有这一行，没再写一遍"; \
+			else \
+				printf '\n# 由 make install 加入\n%s\n' "$$line" >> "$$rc"; \
+				echo "已把 $(BINDIR) 写进 $$rc"; \
+			fi; \
+			echo "新开一个终端就能直接敲 nw；这个窗口先 source $$rc" ;; \
+		esac
 		@$(BINDIR)/nw --version
 
 ~@
@@ -338,7 +354,7 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 
 依赖单独一步：`node_modules` 是别人的代码，不入库，所以要能一条命令装回来。它不进 `all`——构建本身不需要它（语法生成器是纯 Node，`require` 的只有 `fs`/`path`），只有真要在编辑器里看效果时才需要。
 
-公式那一步的 katex 也从这里取，但**不装系统包**：它的依赖声明 `nodejs:any`，而 nodesource 装的 node 不提供这个虚包，`apt install katex` 会把 node 一起换掉。所以只把发行版包里的那份 JS 解出来，放进 `tangle/tools/vendor/`——同样的东西，不碰系统的 node。
+公式那一步的 katex 也从这里取，但**不装系统包**：它的依赖声明 `nodejs:any`，而 nodesource 装的 node 不提供这个虚包，`apt install katex` 会把 node 一起换掉。所以只把发行版包里的那份 JS 解出来，放进 `tangle/vendor/`——同样的东西，不碰系统的 node。
 
 取不到也不致命：后处理器找不到 katex 就把公式留成源码。
 
@@ -346,8 +362,8 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 	# 编辑器插件的三个 npm 依赖（node_modules 不入库）
 	deps:
 		cd tangle/editor && npm install --silent --no-fund --no-audit
-		@mkdir -p tangle/tools/vendor
-		@cd tangle/tools/vendor && \
+		@mkdir -p tangle/vendor
+		@cd tangle/vendor && \
 			apt-get download katex libjs-katex >/dev/null 2>&1 && \
 			for d in katex_*.deb libjs-katex_*.deb; do dpkg-deb -x "$$d" . && rm -f "$$d"; done || \
 			echo "没取到 katex：公式会保留源码形态"
@@ -393,7 +409,7 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 	selfhost: $(NW)
 		@tmp=$$(mktemp -d) || exit 1; \
 		$(NW) tangle -o "$$tmp" $(PROC) >/dev/null || { rm -rf "$$tmp"; exit 1; }; \
-		ok=1; for f in $(NW_SRC) $(NW_HDR) tangle/tests/test_spec.py; do \
+		ok=1; for f in $(NW_SRC) $(NW_HDR) tangle/test_spec.py; do \
 			diff -u "$$f" "$$tmp/$$f" || ok=0; \
 		done; \
 		rm -rf "$$tmp"; \
@@ -479,7 +495,7 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 
 ~@
 
-`check` 只问"读得懂吗"，不断言"读出来的东西对不对"。语义由 `tangle/tests/` 下的契约用例守：规范里每一条至少一个用例，用例名字带条款编号，跑完还会列出没有用例的条款。
+`check` 只问"读得懂吗"，不断言"读出来的东西对不对"。语义由 `tangle/test_spec.py` 里的契约用例守：规范里每一条至少一个用例，用例名字带条款编号，跑完还会列出没有用例的条款。
 
 它不在 `all` 里：测试是验收，不是构建。但它依赖 `$(NW)`——测试的输入是刚编出来的那个二进制，不是仓库里可能过期的副本。
 
@@ -488,7 +504,7 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 	# 先重出一次测试文件：它是第一篇的产物，别拿旧副本测新二进制。
 	test: $(NW)
 		$(NW) tangle -o . "book/Chapter 2/1-syntax.nw"
-		$(PYTHON) tangle/tests/test_spec.py
+		$(PYTHON) tangle/test_spec.py
 
 ~@
 
@@ -528,7 +544,7 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 
 删掉全部次生产物，验证"从零能不能起"。与 `clean` 的区别：`clean` 只删二进制与 HTML，这里连生成的源码一起删。
 
-产物只落在两处：`tangle/` 与 `weave/`。契约测试、开发服务器、书目录都是产物，跟着各自的源落在 `tangle/tests/`、`tangle/tools/` 下——根目录除了手写的元层（`Makefile`、`bootstrap.py`、`.gitignore`、`LICENSE`）和 `book/`，不该再有别的东西；`book/` 里也不该有产物。
+产物只落在两处：`tangle/` 与 `weave/`。契约测试、开发服务器、书目录都是产物，跟着各自的源平铺在 `tangle/` 下——根目录除了手写的元层（`Makefile`、`bootstrap.py`、`.gitignore`、`LICENSE`）和 `book/`，不该再有别的东西；`book/` 里也不该有产物。
 
 <<tangle/Makefile~: scratch>>= @
 
@@ -536,7 +552,7 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 	scratch:
 		@rm -rf tangle/build weave
 		@find tangle -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-		@rm -f tangle/tests/test_spec.py tangle/tools/serve.cpp
+		@rm -f tangle/test_spec.py tangle/serve.cpp
 		@echo "已清理次生产物；make 会从 .nw 重建"
 ~@
 

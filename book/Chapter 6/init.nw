@@ -10,51 +10,73 @@
 
 新项目里没有命令表，`nw run` 无从知道"这个项目里能跑什么"；没有写作约定，agent 会用注释代替散文、把两百行塞进一个块，而没有任何东西提示它这样做是错的。这些缺口在长出第一篇之后才显形，代价是重写。
 
-所以现在写六份：`main.nw`、`Makefile`、`AGENT.md`、`tangle/command.yaml`、`skills/nw-structure.md`、`skills/nw-prose.md`。
+所以现在写七份，摆法和这本书自己的一样——人写的在 `book/`，展开出来的在 `tangle/`：
 
-## 二、command.yaml 是控制面的透传
+```
+AGENT.md
+Makefile
+book/main.nw          第一篇：能跑的最小骨架
+book/book.nw          目录：weave 排页靠它
+book/command.nw       命令表：nw run 认名字靠它
+skills/nw-prose.md
+skills/nw-structure.md
+```
+
+## 二、源进 book/，产物进 tangle/
+
+产物落在哪由作者决定——`nw tangle` 认的是块名里那段路径（`<<tangle/hello.c: main>>`）。新项目定成 `tangle/`：和这本书一样，`ls` 一眼就能分开"人写的"与"展开出来的"。
+
+`.nw` 源全在 `book/` 下。除了整齐，还有一条实在的用处：`tangle/book.yaml` 里的路径写成仓库相对（`book/main.nw`），不相对产物自己——产物可以搬家，书的结构不该跟着搬。
+
+`Makefile` 里除了"展开 + 编译"，还有 `site`（一次性出整站）与 `watch`（起在 8000，改了 `.nw` 就重来）。后者是写的时候那条回路：开着它，改一句就能在浏览器里看见，不必反复敲 make。它不进 `all`——构建不该顺手起一个不退出的进程。
+
+## 三、command.nw 是控制面的源
 
 `nw run` 不知道 `make` 存在，它只按一张表把"名字"换成"入口"。表在新项目里必须有，否则那条命令只能列出一片空白。
 
-放 `tangle/command.yaml` 而不是仓库根：路径与这本书自己的一致，`nw run` 的缺省值就写在代码里，不必每个项目各约定一次。
+表本身也是产物：`book/command.nw` 展开成 `tangle/command.yaml`。这样"能跑什么"与项目里写着什么只有一份事实；手写一份 YAML 也跑得起来，但改命令时就得记得两处。
+
+放 `tangle/` 而不是仓库根：与这本书一致，`nw` 的缺省值就写在代码里（它按 `tangle/`、当前目录的顺序各试一次），不必每个项目各约定一遍。
 
 表里只登记薄薄一层"名字 → 入口"，编译细节留给 `Makefile`——那本来就是一个正常 repo 该说的话，抄一遍到书里只会多一份会过期的东西。
 
-## 三、AGENT.md 是给谁的
+## 四、AGENT.md 是给谁的
 
 给一个刚进这个目录、只知道自己是"写代码的"的 agent。
 
 它不会先读这本书，也不该被要求读完。它需要的是：四个记号、落盘顺序由谁决定、写完必做哪三条命令、有哪些常见报错、以及"散文也是交付物"这一条。够它写出第一篇不丢人东西。
 
-人不必读它。人读的是 `main.nw` 里的散文。
+人不必读它。人读的是 `book/main.nw` 里的散文。
 
-## 四、skills 是把纪律带进项目
+## 五、skills 是把纪律带进项目
 
 `AGENT.md` 只能说到"别把长代码塞进一个块"，说不清为什么。两份 skill 接着往下讲：一份讲装配（一块一次讲解、清单定顺序、什么时候停下来问人），一份讲句子（先让人愿意读、结论要有来路、两类冗余只删一类）。
 
 它们不是这本书的复制品：书里的例子都指着这本书自己的源码，新项目里没有那些东西。模板是删掉例子、留下判据的版本。
 
-## 五、模板也要能被重新生成
+## 六、模板也要能被重新生成
 
-六份内容都是 C++ 里的原文字符串，编进二进制——安装后的工具要能在一个空目录里立刻工作，不能回头去仓库里找模板。它们的源头都在书里，和别的产物一样由 tangle 展开：四份在这一篇，两份 skill 在写它们的那两篇。
+七份内容都是 C++ 里的原文字符串，编进二进制——安装后的工具要能在一个空目录里立刻工作，不能回头去仓库里找模板。它们的源头都在书里，和别的产物一样由 tangle 展开：五份在这一篇，两份 skill 在写它们的那两篇。
 
 这一篇的产物是一个头文件，`tangle/templates.hpp`，`main.cpp` 直接包含。改一句文案，改的是这一处源，不是二进制里的字节。
 
-下面是六份模板，六份各占一块：一块就是一次讲解，读的人不必翻过前一份才知道下一份从哪里开始。`<< templates.hpp >>` 只摆顺序——包括从隔壁两篇引来的那两块。
+下面是七份模板，每份各占一块：一块就是一次讲解，读的人不必翻过前一份才知道下一份从哪里开始。`<< templates.hpp >>` 只摆顺序——包括从隔壁两篇引来的那两块。
 
-其中两块要用围栏护住：`main.nw` 的正文里有行首的 `<<tangle/hello.c: …>>= @`，`AGENT.md` 的正文里有语法示例，不护就会被这一章当成块头读走。四个反引号的栏内一切都是字面，栏本身不落盘。
+其中两块要用围栏护住：`book/main.nw` 的正文里有行首的 `<<tangle/hello.c: …>>= @`，`AGENT.md` 的正文里有语法示例，不护就会被这一章当成块头读走。四个反引号的栏内一切都是字面，栏本身不落盘。
 
 tangle/templates.hpp @
 
 << templates.hpp >>= @
-	// `nw init` 写出的六份文件。全部编进二进制：安装后的工具不依赖仓库，
+	// `nw init` 写出的七份文件。全部编进二进制：安装后的工具不依赖仓库，
 	// 但源头仍是这本书——改文案改这一节，改完重新展开。
 
 	<< template-main-nw >>
 
-	<< template-makefile >>
+	<< template-book-nw >>
 
-	<< template-commands >>
+	<< template-command-nw >>
+
+	<< template-makefile >>
 
 	<< template-agent-md >>
 
@@ -85,46 +107,98 @@ tangle/templates.hpp @
 	````
 ~@
 
+<< template-book-nw >>= @
+	````
+	static const char* INIT_BOOK_NW = R"BK(# 目录
+
+	这一页是这本书的目录，也是 `nw weave` 读的那份数据。
+
+	<<tangle/book.yaml: 目录>>= @
+		# 这个项目的目录。顺序就是阅读顺序，parts 就是网站上的分章。
+		#
+		# 路径相对仓库根，不相对产物自己：产物可以搬家，书的结构不该跟着搬。
+
+		title: 我的第一篇
+
+		parts:
+		  - title: 正文
+		    files:
+		      - book/main.nw
+	~@
+	)BK";
+	````
+~@
+
+<< template-command-nw >>= @
+	````
+	static const char* INIT_COMMAND_NW = R"CM(# 命令表
+
+	`nw run` 读这张表。一条三行：名字、源（先展开这一篇；不需要就不写）、入口。
+
+	<<tangle/command.yaml: 命令>>= @
+		# 这个项目里能跑什么。
+		# `nw run` 读这张表；所以"能跑什么"与项目里写着什么只有一份事实。
+
+		- name: all
+		  run: make all
+
+		- name: run
+		  run: make run
+
+		- name: html
+		  run: make html
+
+		- name: site
+		  run: make site
+
+		- name: watch
+		  run: make watch
+
+		- name: clean
+		  run: make clean
+	~@
+	)CM";
+	````
+~@
+
 << template-makefile >>= @
 	static const char* INIT_MAKEFILE = R"MK(NW ?= nw
 
-	all: run
+	# 命令表与目录也顺手展开：第一次 make 之后，nw run 与 nw weave 就能直接用。
+	all: run tangle/command.yaml tangle/book.yaml
 
 	# 展开：.nw → tangle/hello.c。只有改了 .nw 才重展。
-	tangle/hello.c: main.nw
-		@$(NW) tangle -o . main.nw
+	tangle/hello.c: book/main.nw
+		@$(NW) tangle -o . book/main.nw
+
+	# 命令表与目录也是产物：各自从 book/ 下那一篇展开。
+	tangle/command.yaml: book/command.nw
+		@$(NW) tangle -o . book/command.nw
+
+	tangle/book.yaml: book/book.nw
+		@$(NW) tangle -o . book/book.nw
 
 	run: tangle/hello.c
 		cc -std=c99 -Wall -Wextra -o tangle/hello tangle/hello.c
 		@./tangle/hello
 
 	# 网页：一份自包含 HTML，双击就能看。
-	html: main.nw
-		@$(NW) weave -o main.html main.nw
+	html: book/main.nw
+		@$(NW) weave -o main.html book/main.nw
+
+	# 整站：按目录排页，产物落在 weave/。
+	site: tangle/book.yaml
+		@$(NW) weave -o weave
+
+	# 预览：起在 8000，改了 book/ 下的 .nw 就整站重来；Ctrl+C 退出。
+	watch: tangle/book.yaml
+		@$(NW) watch 8000 weave
 
 	clean:
-		rm -rf tangle main.html
+		rm -rf tangle weave main.html
 
-	.PHONY: all run html clean
+	.PHONY: all run html site watch clean
 	)MK";
-~@
-
-<< template-commands >>= @
-	static const char* INIT_COMMANDS = R"CMD(# 这个项目里能跑什么。一条三行：名字、源（先展开这一篇；不需要就不写）、入口。
-	# `nw run` 读这张表；所以"能跑什么"与项目里写着什么只有一份事实。
-
-	- name: all
-	  run: make all
-
-	- name: run
-	  run: make run
-
-	- name: html
-	  run: make html
-
-	- name: clean
-	  run: make clean
-	)CMD";
 ~@
 
 << template-agent-md >>= @
@@ -158,9 +232,9 @@ tangle/templates.hpp @
 	## 写完必做三件事
 
 	```
-	nw check main.nw          # 只解析 + 展开，不写盘；引用错了这里就报
-	nw tangle -o . main.nw    # 看产物，比读散文可靠
-	nw run                    # 列出命令表；nw run <名字> 执行
+	nw check book/main.nw          # 只解析 + 展开，不写盘；引用错了这里就报
+	nw tangle -o . book/main.nw    # 看产物，比读散文可靠
+	nw run                         # 列出命令表；nw run <名字> 执行
 	```
 
 	## 写作纪律
@@ -184,8 +258,8 @@ tangle/templates.hpp @
 
 	## 底下的工具
 
-	`nw watch` 起本地预览（8000 端口），改了 `.nw` 自动重渲染；`nw run` 走 `tangle/command.yaml`；
-	`man nw` 是完整手册。
+	`make watch` 起本地预览（8000 端口），改了 `.nw` 自动重渲染——写的时候开着它，比反复敲 make 快；
+	`nw run` 走 `tangle/command.yaml`；`man nw` 是完整手册。
 	)AG";
 	````
 ~@
@@ -194,7 +268,7 @@ tangle/templates.hpp @
 
 两个 `~@` 不是笔误：一个关 `template-agent-md` 那块，一个关命名空间。`tangle/templates.hpp @` 圈的是整个产物的落盘范围，这一篇的五个块都落在里面，落盘顺序由顶上那份清单决定。
 
-六份模板都以 `R"XX(` 开头、` )XX"` 收尾，定界符各不相同：正文里有括号、有反引号、有中文标点，统一用圆括号最容易撞上。
+七份模板都以 `R"XX(` 开头、` )XX"` 收尾，定界符各不相同：正文里有括号、有反引号、有中文标点，统一用圆括号最容易撞上。
 
 怎么把它们写进目录、碰到同名文件怎么办，归命令行那一层管（`[[cli.nw]]`）；这一篇只负责这些字节长什么样。
 

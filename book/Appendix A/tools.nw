@@ -7,7 +7,7 @@
 这一篇的用法和别篇不同：它是**工具集**，不是"一个工具的使用说明"。每个工具一节，节名就是它的工作；两个工具共享的规矩写在前面。要加第三个工具，三步：
 
 - 写一节：它为什么长成这样，比它做了什么重要；
-- 给它的每一块起名 `tangle/tools/<名字>.cpp: …`——**chunk 名里已经写好了产物路径**，不用另立一份清单；
+- 给它的每一块起名 `tangle/<名字>.cpp: …`——**chunk 名里已经写好了产物路径**，不用另立一份清单；
 - 在 `tangle/Makefile` 的 `NW_SRC`（编译）与 `PROC`（展开）里各加一处。
 
 展开、清理、漂移比对都由已有规则接住：`GENERATED` 里多一行，`verify` 就会替你盯着它有没有与 `.nw` 对齐。
@@ -20,7 +20,7 @@
 
 三条，两个工具都遵守。
 
-**都是产物。** 源住在这篇里，`nw tangle` 展开成 `tangle/tools/*.cpp`，再和别的翻译单元一起编进 `nw`。手改 `.cpp` 与手改 `weave/` 里的 HTML 是同一类错误：改动活在产物里，下一次展开就没了。
+**都是产物。** 源住在这篇里，`nw tangle` 展开成 `tangle/*.cpp`，再和别的翻译单元一起编进 `nw`。手改 `.cpp` 与手改 `weave/` 里的 HTML 是同一类错误：改动活在产物里，下一次展开就没了。
 
 **都是可选的。** 缺 `dot` 就保留图源，缺 `node` 就保留 TeX——书照常可读，构建不红。工具缺席是"少了一层增强"，不是"构建失败"。
 
@@ -42,7 +42,7 @@
 
 头文件分两组：前一组是 POSIX（socket、文件、信号），后一组是标准库。分组不是为了好看——看到第一组就知道这个程序只跑在类 Unix 上，不必假装可移植。
 
-<<tangle/tools/serve.cpp: preamble>>= @
+<<tangle/serve.cpp: preamble>>= @
 	// 把 weave/ 下的 HTML 起到一个端口上：这是 `nw watch` 的一半。
 	//
 	// 只做三件事：列目录、发文件、拦住越界。没有代理、没有压缩、没有 WebSocket。
@@ -80,7 +80,7 @@
 
 表只列书里真会出现的后缀。查不到就退化成 `application/octet-stream`——浏览器会把它当下载，而不是猜着执行。
 
-<<tangle/tools/serve.cpp: mime>>= @
+<<tangle/serve.cpp: mime>>= @
 	// 浏览器靠 Content-Type 决定怎么解释字节；猜错的后果是"页面变纯文本"或乱码。
 	struct Mime {
 		const char* ext;
@@ -114,7 +114,7 @@
 
 （不跟软链接：`weave/` 里全是 tangle 自己生成的平铺文件，没有链接可跟。真要有，就得先 `realpath` 再比前缀。）
 
-<<tangle/tools/serve.cpp: paths>>= @
+<<tangle/serve.cpp: paths>>= @
 	static int hexval(char c) {
 		if (c >= '0' && c <= '9') return c - '0';
 		if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -213,7 +213,7 @@
 
 `quote` 处理文件名里的空格与中文：链接里出现裸空格，浏览器会自己截断。
 
-<<tangle/tools/serve.cpp: index-page>>= @
+<<tangle/serve.cpp: index-page>>= @
 	// 只在 weave/ 里还没有 index.html 时用到：至少别让人看到 404。
 	static string index_page() {
 		vector<string> names;
@@ -259,7 +259,7 @@
 
 一次 `write` 不保证写完。`write_all` 循环到写完为止，遇到 `EINTR` 重试——这两件事在任何"发一坨字节"的地方都得做。
 
-<<tangle/tools/serve.cpp: reply>>= @
+<<tangle/serve.cpp: reply>>= @
 	static void write_all(int fd, const string& data) {
 		size_t off = 0;
 		while (off < data.size()) {
@@ -295,7 +295,7 @@
 
 日志是 `handle` 的最后一行：请求行与状态码压成一行，前面留两个空格。一边看日志一边刷新时，一行一次请求比两行好扫。Python 版的日志靠覆盖基类的一个方法来摘出来，C++ 里没有这层必要——它本来就是一行 `fprintf`。
 
-<<tangle/tools/serve.cpp: handler>>= @
+<<tangle/serve.cpp: handler>>= @
 	static void handle(int fd) {
 		// 只读一次、只认第一行：这个方法只支持 GET，头部里没有我们需要的东西。
 		char buf[8192];
@@ -361,7 +361,7 @@
 
 根目录先碾成绝对路径再进主循环：后面每次拼接都假定它没有 `.` 与 `..`，这个假定只该在一个地方成立。
 
-<<tangle/tools/serve.cpp: main>>= @
+<<tangle/serve.cpp: main>>= @
 	// 入口不是 main：这个文件编进 nw，和 weave 共用一个进程。
 	// 第三个参数是"两次请求之间做什么"——watch 用它在空闲时检查源文件有没有变。
 	int serve_run(int port, const string& dir, void (*on_idle)()) {
@@ -473,7 +473,7 @@
 
 先把要认的标记写成常量。写成常量而不是散在代码里，是因为识别与替换必须用**同一份**字面量——两处各写一遍，改一处就会留下一半。
 
-<<tangle/tools/enhance.cpp: preamble>>= @
+<<tangle/enhance.cpp: preamble>>= @
 	// 页面写完之后的两步增强：dot 图源 → 内联 SVG，$…$ → MathML。
 	//
 	// 两个工具都是可选的：缺 dot 就保留 <pre class="dot">，缺 katex 就保留原文。
@@ -509,9 +509,9 @@
 
 读写各一行。**二进制得问内核自己从哪儿来**：脚本有 `__file__`，二进制没有，这里问的是 `/proc/self/exe`——它能同时接住软链接与相对路径两种调用方式，比自己拼 `argv[0]` 可靠。
 
-为什么要知道自己在哪？因为 katex 的 JS 在 `tangle/tools/vendor/` 而二进制在 `tangle/build/`：两者的相对位置是固定的，而"当前目录"不是——`make` 在仓库根跑，人可能在任意目录敲这条命令。
+为什么要知道自己在哪？因为 katex 的 JS 在 `tangle/vendor/` 而二进制在 `tangle/build/`：两者的相对位置是固定的，而"当前目录"不是——`make` 在仓库根跑，人可能在任意目录敲这条命令。
 
-<<tangle/tools/enhance.cpp: files>>= @
+<<tangle/enhance.cpp: files>>= @
 	static string slurp(const string& path) {
 		ifstream in(path, ios::binary);
 		return string((istreambuf_iterator<char>(in)), istreambuf_iterator<char>());
@@ -533,8 +533,8 @@
 		return slash == string::npos ? "." : path.substr(0, slash);
 	}
 	
-	// make deps 把发行版包里的 katex 解到 tangle/tools/vendor；它是可选的。
-	static string vendor_dir() { return self_dir() + "/../tools/vendor"; }
+	// make deps 把发行版包里的 katex 解到 tangle/vendor；它是可选的。
+	static string vendor_dir() { return self_dir() + "/../vendor"; }
 ~@
 
 #### C.2.3 起一个过滤器：写与读必须并行
@@ -549,7 +549,7 @@
 
 没有超时。原版设了 20 秒与 60 秒，但这里的两个工具都是本地小进程：`dot` 卡住通常是图本身有问题，超时也只是把"卡住"变成"悄悄保留源码"，反而更难发现。真要卡住，`Ctrl+C` 比超时更快。
 
-<<tangle/tools/enhance.cpp: run>>= @
+<<tangle/enhance.cpp: run>>= @
 	// 起一个过滤器：argv[0] 走 PATH 查找，输入喂 stdin，输出收 stdout，stderr 丢掉。
 	// 返回 false 表示起不来或非零退出——调用方据此保留源码形态。
 	//
@@ -640,7 +640,7 @@ weave 把 `$…$` 写进 HTML 时做了转义，所以取出来要先还原实�
 
 然后剥定界符：行内是 `$…$`，块级是 `$$…$$`。剥之前要 `trim`：块级公式在源码里跨行，前后带换行与缩进，留着它们 KaTeX 也能排，但报错信息会指着一个空行。
 
-<<tangle/tools/enhance.cpp: html>>= @
+<<tangle/enhance.cpp: html>>= @
 	static void put_utf8(string& out, long code) {
 		if (code < 0x80) {
 			out.push_back(static_cast<char>(code));
@@ -700,7 +700,7 @@ weave 把 `$…$` 写进 HTML 时做了转义，所以取出来要先还原实�
 	}
 ~@
 
-<<tangle/tools/enhance.cpp: tex>>= @
+<<tangle/enhance.cpp: tex>>= @
 	// 剥掉定界符：行内 `$…$`，块级 `$$…$$`。
 	static string tex_of(const string& inner, bool display) {
 		string t = trim(unescape(inner));
@@ -722,9 +722,9 @@ weave 把 `$…$` 写进 HTML 时做了转义，所以取出来要先还原实�
 
 `throwOnError` 打开，每条各自 catch：**一条写错不该毁掉一整页**。失败的那条回空串，调用方保留原文。
 
-katex 不放系统里：它的 apt 包声明 `nodejs:any`，而 nodesource 装的 node 不提供这个虚包，`apt install katex` 会把 node 一起换掉。所以 `make deps` 只**取包里那份 JS**，解到 `tangle/tools/vendor/`，不进仓库。
+katex 不放系统里：它的 apt 包声明 `nodejs:any`，而 nodesource 装的 node 不提供这个虚包，`apt install katex` 会把 node 一起换掉。所以 `make deps` 只**取包里那份 JS**，解到 `tangle/vendor/`，不进仓库。
 
-<<tangle/tools/enhance.cpp: math>>= @
+<<tangle/enhance.cpp: math>>= @
 	// 一次 node 启动算完整页的式子：每个式子起一个进程要几百毫秒。
 	// 用 NUL 分隔条目，避免 JSON——省一次编解码，也省一类转义错误。
 	static const char* KATEX_JS = R"JS(
@@ -780,7 +780,7 @@ dot 只输出一段 `<svg>`，前后还有 XML 声明与生成器注释，都丢
 
 前缀用字符串扫描插进去，不引正则：要改的只有两处，`id="` 与 `url(#`，都是字面前缀。`std::regex` 又慢又难读，为这两处不值得。
 
-<<tangle/tools/enhance.cpp: dot>>= @
+<<tangle/enhance.cpp: dot>>= @
 	// 在 key 之后统一插一段前缀：id="x" → id="g0_x"，url(#x) → url(#g0_x)。
 	// 同页两张图必须加前缀，否则第二张的箭头会指到第一张的节点上。
 	static string prefix_after(const string& s, const string& key, const string& pre) {
@@ -825,7 +825,7 @@ dot 只输出一段 `<svg>`，前后还有 XML 声明与生成器注释，都丢
 
 块级公式换完还要保留外壳 `div.math-block`：它负责居中与横向滚动，外壳丢了排版就散了。
 
-<<tangle/tools/enhance.cpp: page>>= @
+<<tangle/enhance.cpp: page>>= @
 	struct Gap {
 		size_t a, b;
 		string text;
@@ -935,7 +935,7 @@ dot 只输出一段 `<svg>`，前后还有 XML 声明与生成器注释，都丢
 
 只写有变化的文件：把每一页都重写一遍，等于让浏览器缓存与任何增量同步工具白做，而内容其实一个字都没变。
 
-<<tangle/tools/enhance.cpp: main>>= @
+<<tangle/enhance.cpp: main>>= @
 	// 入口不是 main：weave 写完页面直接调它，watch 每次重渲染也走同一条路。
 	int enhance_dir(const string& root) {
 		// 只扫一层：weave/ 里全是平铺的 HTML，没有子目录，不必递归。

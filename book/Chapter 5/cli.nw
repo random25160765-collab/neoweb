@@ -23,7 +23,7 @@ tangle/main.cpp @
 
 第四个是 `run`：它不在这条线上——不解析全书，只按命令表展开那一篇，然后把剩下的活交给仓库的入口。所以它单独分派，见第八节。
 
-再往后的 `init` 与 `tutorial` 也不在解析那条线上：一个只往空目录里写六份文件，一个只在临时目录里读一份稿子。它们和 `run` 一样，在合并之前就分派出去——前者在第九节，后者在下一篇。
+再往后的 `init` 与 `tutorial` 也不在解析那条线上：一个只往空目录里写七份文件，一个只在临时目录里读一份稿子。它们和 `run` 一样，在合并之前就分派出去——前者在第九节，后者在下一篇。
 
 还有 `watch`：它不是第三个处理器，而是 `weave` 外面套的一层循环——渲染一次、起一个只听本机的端口、盯着 `book/` 的 mtime，变了就整站重来（第七节末尾）。它也在这条线之外：它的活是"反复 weave"，不是"这一次怎么渲染"。
 
@@ -35,10 +35,12 @@ tangle/main.cpp @
 
 入口只剩命令行：解析参数、读书目录、分派到三个子命令。**它不含任何算法**——真正的活都在前四个文件里。
 
+两个缺省路径（书目录、命令表）都按"先 `tangle/`、再当前目录"各试一次，取第一个存在的。理由很实际：产物全在 `tangle/` 下，人在那儿敲 `nw` 是常事；路径若只写死一处，换个目录就报"找不到"，报出来的还是一条跟人所在位置无关的路径。
+
 << prologue >>= @
 	#include "nw.hpp"
 
-	// init 写出的六份模板。单独一个头文件：它们是文案，不是这一章的算法，
+	// init 写出的七份模板。单独一个头文件：它们是文案，不是这一章的算法，
 	// 混进 main.cpp 会把命令行淹掉；而且改文案只需重展这一篇。
 	#include "templates.hpp"
 
@@ -46,11 +48,20 @@ tangle/main.cpp @
 
 	namespace nw {
 
+	// 缺省路径要照顾两种 cwd：仓库根，和 tangle/ 自己——产物都在 tangle/ 下，
+	// 在那儿敲 nw 是常事。两个位置都试，取第一个存在的；都没有就把第一个名字
+	// 带进报错，人一眼知道该找什么。
+	static string first_existing(const vector<string>& candidates) {
+		for (const auto& p : candidates)
+			if (std::ifstream(p)) return p;
+		return candidates.front();
+	}
+
 	// 默认的书目录：weave 不带参数时就读它（book/menu.nw 的产物）。
-	static const char* DEFAULT_BOOK = "tangle/tools/book.yaml";
+	static string default_book() { return first_existing({"tangle/book.yaml", "book.yaml"}); }
 
 	// 默认的命令表：run 读它来找"这条命令怎么跑"（附录 A 控制面的产物）。
-	static const char* COMMANDS = "tangle/command.yaml";
+	static string default_commands() { return first_existing({"tangle/command.yaml", "command.yaml"}); }
 
 ~@
 
@@ -76,12 +87,7 @@ tangle/main.cpp @
 		          << "  nw check    源.nw [更多.nw …]\n"
 		          << "  nw run      [名字]\n"
 		          << "  nw version | --version | -V\n"
-		          << "  nw --help | -h\n"
-		          << "\n"
-		          << "weave 缺省按 tangle/tools/book.yaml 出整站；-o 的目标以 .html 结尾时只渲那一页；\n"
-		          << "--files 让输入按命令行顺序成站，与 --book 互斥。\n"
-		          << "tangle 可以给多篇：同一份书里分散在不同章节的 chunk 会按顺序合到一起落盘。\n"
-		          << "man nw 是这一页的手册：由本书展开，make install 装进 manpath。\n";
+		          << "  nw --help | -h\n";
 	}
 
 	// 版本串。装进 PATH 之后，它要靠这个自报身份。
@@ -106,7 +112,7 @@ tangle/main.cpp @
 	struct Args {
 		string cmd;
 		string target;
-		string book;      // --book：书目录路径（缺省用 DEFAULT_BOOK）
+		string book;      // --book：书目录路径（缺省用 default_book()）
 		bool files = false;  // --files：明说"就按命令行这几个文件出站点"
 		bool debug = false;  // --debug：C/C++ 产物里插 #line，编译错误指回 .nw
 		vector<string> inputs;
@@ -267,13 +273,14 @@ tangle/main.cpp @
 		// 先记下这次看到的状态：渲染失败时也记，否则半成品会让它每半秒重试一次，把终端刷满。
 		WATCH_SEEN = newest_source_time();
 		try {
-			Book b = read_book(DEFAULT_BOOK);
+			string book = default_book();
+			Book b = read_book(book);
 			vector<string> inputs, parts;
 			for (const auto& bp : book_pages(b)) {
 				inputs.push_back(bp.path);
 				parts.push_back(bp.part);
 			}
-			if (inputs.empty()) throw Error(DEFAULT_BOOK, 0, "书目录里一页都没有");
+			if (inputs.empty()) throw Error(book, 0, "书目录里一页都没有");
 			vector<Document> docs;
 			for (const auto& f : inputs) docs.push_back(parse(read_file(f), f));
 			std::filesystem::remove_all(WATCH_DIR);
@@ -384,7 +391,8 @@ tangle/main.cpp @
 << cmd-run >>= @
 	// run：先按命令表展开它的源，再把活交给仓库的入口（cwd 由调用方决定）。
 	static int cmd_run(const Args& a) {
-		vector<Command> cmds = read_commands(COMMANDS);
+		string table = default_commands();
+		vector<Command> cmds = read_commands(table);
 		if (a.inputs.empty()) {
 			for (const auto& c : cmds) std::cout << c.name << "\t" << c.run << "\n";
 			return 0;
@@ -396,7 +404,7 @@ tangle/main.cpp @
 		if (!hit) {
 			string names;
 			for (const auto& c : cmds) names += (names.empty() ? "" : "、") + c.name;
-			throw Error(COMMANDS, 0, "没有这条命令：" + a.inputs.front() + "（有：" + names + "）");
+			throw Error(table, 0, "没有这条命令：" + a.inputs.front() + "（有：" + names + "）");
 		}
 		// 展开它的源：命令要跑在刚展开出来的产物上，而不是上次构建的残留。
 		if (!hit->source.empty()) {
@@ -405,7 +413,7 @@ tangle/main.cpp @
 			for (const auto& p : tangle(doc, hit->source, true)) write_file(p.path, join_lines(p.lines));
 		}
 		int st = std::system(hit->run.c_str());
-		if (st == -1) throw Error(COMMANDS, 0, "命令起不来：" + hit->run);
+		if (st == -1) throw Error(table, 0, "命令起不来：" + hit->run);
 		return (st >> 8) & 0xff;
 	}
 
@@ -415,13 +423,13 @@ tangle/main.cpp @
 
 `init` 是唯一一个"不读输入、只写文件"的子命令。它要解决的问题很具体：装好 `nw` 之后，一个还不懂 `<< 名字 >>= @` 的人，怎么在五分钟里看到自己的第一份产物。
 
-答案是六份文件：一篇能 tangle 的稿子、一条展开再编译的规则，外加给接手者的四份契约。为什么是六份而不是两份，写在第六章（`[[init.nw]]`）——那些缺口，比如新项目里没有命令表、没有写作约定，都是长出第一篇之后才显形的。
+答案是七份文件：`book/` 下三篇稿子（正文、目录、命令表）、一条展开再编译的规则，外加给接手者的三份契约。为什么是七份而不是两份，写在第六章（`[[init.nw]]`）——那些缺口，比如新项目里没有命令表、没有写作约定，都是长出第一篇之后才显形的。
 
 这一节只管调度：往哪写、写不写、写到哪停。模板内容一个字也不在这儿——它们在 `tangle/templates.hpp`，由那一节展开，和别的产物一样编进二进制。骨架该随程序一起走，不该要求先联网、先读这本书；但骨架的源头仍是书，不是二进制里的字节。
 
-两件事要守。第一，写入前把六份全查一遍，不只查正要写的那份：初始化只该发生在空处，覆盖等于悄悄毁掉别人的稿子；而写到一半才发现冲突，留下的是一个半成品目录，比直接失败更难收拾。第二，查完再写，中间不给人插手的余地——这版假设"要么全成、要么整个程序失败"。
+两件事要守。第一，写入前把七份全查一遍，不只查正要写的那份：初始化只该发生在空处，覆盖等于悄悄毁掉别人的稿子；而写到一半才发现冲突，留下的是一个半成品目录，比直接失败更难收拾。第二，查完再写，中间不给人插手的余地——这版假设"要么全成、要么整个程序失败"。
 
-六份装进一张表，不是六个 `if`：路径与内容一一对应，加一份、删一份都只动一行，而"先查后写"两遍循环也只写一遍。字段起名字而不是用 `pair`，是因为这张表是给人读的——哪个是路径、哪个是内容，不该靠位置去猜。
+七份装进一张表，不是七个 `if`：路径与内容一一对应，加一份、删一份都只动一行，而"先查后写"两遍循环也只写一遍。字段起名字而不是用 `pair`，是因为这张表是给人读的——哪个是路径、哪个是内容，不该靠位置去猜。
 
 `Makefile` 的默认目标只调 `nw tangle`，`html` 目标才调 `nw weave`：先让人看到"源变成产物"，再谈网页。
 
@@ -429,17 +437,18 @@ tangle/main.cpp @
 	// init：给一个空目录装上能跑的最小骨架。目录可以还不存在。
 	static int cmd_init(const Args& a) {
 		string dir = a.inputs.empty() ? "." : a.inputs.front();
-		// 六份产物与模板一一对应：加一份、换一句文案，都只改这张表。
+		// 七份产物与模板一一对应：加一份、换一句文案，都只改这张表。
 		// 字段有名字而不是用 pair：这张表是给人读的，"哪个是路径"不该靠位置猜。
 		struct Skeleton {
 			const char* path;
 			const char* text;
 		};
 		static const Skeleton files[] = {
-		    {"main.nw", INIT_MAIN_NW},
+		    {"book/main.nw", INIT_MAIN_NW},
+		    {"book/book.nw", INIT_BOOK_NW},
+		    {"book/command.nw", INIT_COMMAND_NW},
 		    {"Makefile", INIT_MAKEFILE},
 		    {"AGENT.md", INIT_AGENT_MD},
-		    {"tangle/command.yaml", INIT_COMMANDS},
 		    {"skills/nw-structure.md", INIT_SKILL_STRUCTURE},
 		    {"skills/nw-prose.md", INIT_SKILL_PROSE},
 		};
@@ -523,7 +532,7 @@ tangle/main.cpp @
 				if (a.inputs.empty()) throw Error("<命令行>", 0, "--files 后面要跟至少一篇");
 			} else {
 				// 缺省：读书的目录。没有目录就不出站点——顺序不该由命令行临时决定。
-				string path = a.book.empty() ? string(DEFAULT_BOOK) : a.book;
+				string path = a.book.empty() ? default_book() : a.book;
 				Book b = read_book(path);
 				a.inputs.clear();
 				for (const auto& bp : book_pages(b)) {

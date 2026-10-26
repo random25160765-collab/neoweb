@@ -75,8 +75,9 @@ roff 是排版语言，不是 Markdown：`.SH` 起节、`.TP` 起条目、`.B`/`
 	.TP
 	.B init
 	.na
-	在当前目录（或给定目录）写下六份文件：\fImain.nw\fP、\fIMakefile\fP、\fIAGENT.md\fP、
-	\fItangle/command.yaml\fP 与 \fIskills/\fP 下的两份写作细则。已有同名文件时不覆盖。
+	在当前目录（或给定目录）写下七份文件：\fIbook/\fP 下的 \fImain.nw\fP、\fIbook.nw\fP、
+	\fIcommand.nw\fP，根上的 \fIMakefile\fP 与 \fIAGENT.md\fP，以及 \fIskills/\fP 下的两份写作细则。
+	已有同名文件时不覆盖。
 	.TP
 	.B tutorial
 	.na
@@ -118,7 +119,8 @@ roff 是排版语言，不是 Markdown：`.SH` 起节、`.TP` 起条目、`.B`/`
 	.TP
 	.B \-\-book \fI书目录\fP
 	.na
-	weave 要读的书目录。缺省是 \fItangle/tools/book.yaml\fP，由 \fIbook/menu.nw\fP 展开得到。
+	weave 要读的书目录。缺省先找 \fItangle/book.yaml\fP，找不到再找当前目录的 \fIbook.yaml\fP；
+	它由 \fIbook/menu.nw\fP 展开得到。
 	.TP
 	.B \-\-files
 	.na

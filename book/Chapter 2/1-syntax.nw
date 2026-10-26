@@ -127,7 +127,7 @@ tangle/parse.cpp @
 
 不要从头读到尾。按这个顺序，五分钟能建出地图：
 
-1. **`book/menu.nw`** —— 目录章的末尾就是全书的结构清单：分几部、每部几篇、阅读顺序。`tangle/tools/book.yaml` 是它 tangle 出来的产物，别读那份。
+1. **`book/menu.nw`** —— 目录章的末尾就是全书的结构清单：分几部、每部几篇、阅读顺序。`tangle/book.yaml` 是它 tangle 出来的产物，别读那份。
 2. **每篇第一个 `#` 标题** —— `grep '^# ' 篇目`，十秒钟知道这一篇在讲什么。
 3. **块目录** —— `grep -n '^<< ' 篇目.nw`。块名就是这一篇的小目录；`<< 名字 >>= @` 是有体的定义，`<< 路径: 名字 >>=` 是带产物的定义。
 4. **先 check 再读** —— `nw check 篇目.nw`。过不了说明文件本身坏了，别浪费时间理解它。
@@ -173,7 +173,7 @@ tangle/parse.cpp @
 
 账本：编号、一句话。省略号那几条（S6.2b、S6.4）没有单独列——它们不是"另一条规则"，是同一组的边界情况。
 
-tangle/tests/test_spec.py @
+tangle/test_spec.py @
 
 
 << 头 >>= @
@@ -185,7 +185,7 @@ tangle/tests/test_spec.py @
 	跑完还会列出"哪些条款还没有用例"。规范本身在 `docs/syntax-v2.md`，
 	本篇前半讲的是这些条款为什么长成这样。
 	
-	跑法：make test      或      python3 tangle/tests/test_spec.py
+	跑法：make test      或      python3 tangle/test_spec.py
 	需要先有 tangle/build/nw（make 会先建它）。
 	"""
 	
@@ -195,8 +195,8 @@ tangle/tests/test_spec.py @
 	import sys
 	import tempfile
 	
-	# 这个文件落在 tangle/tests/ 下：仓库根要往上三级。
-	ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+	# 这个文件落在 tangle/ 下：仓库根要往上两级。
+	ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 	NW = os.path.join(ROOT, "tangle", "build", "nw")
 	
 	# 条款表：编号 → 一句话。省略号那几条由 bad() 用例覆盖，不单独列。
