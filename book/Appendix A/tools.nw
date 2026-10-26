@@ -41,7 +41,6 @@
 头文件分两组：前一组是 POSIX（socket、文件、信号），后一组是标准库。分组不是为了好看——看到第一组就知道这个程序只跑在类 Unix 上，不必假装可移植。
 
 <<tangle/tools/serve.cpp: preamble>>= @
-	// 由 book/Appendix A/tools.nw 生成，请勿手改。
 	// 把 weave/ 下的 HTML 起到一个端口上：tangle/build/serve [端口] [目录]
 	//
 	// 只做三件事：列目录、发文件、拦住越界。没有热更新、没有代理、没有压缩。
@@ -111,7 +110,6 @@
 （不跟软链接：`weave/` 里全是 tangle 自己生成的平铺文件，没有链接可跟。真要有，就得先 `realpath` 再比前缀。）
 
 <<tangle/tools/serve.cpp: paths>>= @
-@long
 	static int hexval(char c) {
 		if (c >= '0' && c <= '9') return c - '0';
 		if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -293,7 +291,6 @@
 日志是 `handle` 的最后一行：请求行与状态码压成一行，前面留两个空格。一边看日志一边刷新时，一行一次请求比两行好扫。Python 版的日志靠覆盖基类的一个方法来摘出来，C++ 里没有这层必要——它本来就是一行 `fprintf`。
 
 <<tangle/tools/serve.cpp: handler>>= @
-@long
 	static void handle(int fd) {
 		// 只读一次、只认第一行：这个方法只支持 GET，头部里没有我们需要的东西。
 		char buf[8192];
@@ -360,7 +357,6 @@
 根目录先碾成绝对路径再进主循环：后面每次拼接都假定它没有 `.` 与 `..`，这个假定只该在一个地方成立。
 
 <<tangle/tools/serve.cpp: main>>= @
-@long
 	int main(int argc, char** argv) {
 		if (argc > 1) PORT = atoi(argv[1]);
 		const char* dir = argc > 2 ? argv[2] : "weave";
@@ -457,7 +453,6 @@
 先把要认的标记写成常量。写成常量而不是散在代码里，是因为识别与替换必须用**同一份**字面量——两处各写一遍，改一处就会留下一半。
 
 <<tangle/tools/enhance.cpp: preamble>>= @
-	// 由 book/Appendix A/tools.nw 生成，请勿手改。
 	// 构建末尾的两步增强：dot 图源 → 内联 SVG，$…$ → MathML。
 	//
 	// 两个工具都是可选的：缺 dot 就保留 <pre class="dot">，缺 katex 就保留原文。
@@ -532,7 +527,6 @@
 没有超时。原版设了 20 秒与 60 秒，但这里的两个工具都是本地小进程：`dot` 卡住通常是图本身有问题，超时也只是把"卡住"变成"悄悄保留源码"，反而更难发现。真要卡住，`Ctrl+C` 比超时更快。
 
 <<tangle/tools/enhance.cpp: run>>= @
-@long
 	// 起一个过滤器：argv[0] 走 PATH 查找，输入喂 stdin，输出收 stdout，stderr 丢掉。
 	// 返回 false 表示起不来或非零退出——调用方据此保留源码形态。
 	//
@@ -624,7 +618,6 @@ weave 把 `$…$` 写进 HTML 时做了转义，所以取出来要先还原实�
 然后剥定界符：行内是 `$…$`，块级是 `$$…$$`。剥之前要 `trim`：块级公式在源码里跨行，前后带换行与缩进，留着它们 KaTeX 也能排，但报错信息会指着一个空行。
 
 <<tangle/tools/enhance.cpp: html>>= @
-@long
 	static void put_utf8(string& out, long code) {
 		if (code < 0x80) {
 			out.push_back(static_cast<char>(code));
@@ -810,7 +803,6 @@ dot 只输出一段 `<svg>`，前后还有 XML 声明与生成器注释，都丢
 块级公式换完还要保留外壳 `div.math-block`：它负责居中与横向滚动，外壳丢了排版就散了。
 
 <<tangle/tools/enhance.cpp: page>>= @
-@long
 	struct Gap {
 		size_t a, b;
 		string text;

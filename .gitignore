@@ -1,7 +1,7 @@
 # 元层（手写，入库）：*.nw、Makefile、bootstrap.py、.gitignore
 # 其余全部是次生产物：留着就是同一个事实的两份，而两份迟早不一致。
 
-tangle/*
+tangle/
 weave/
 
 # Python 字节码

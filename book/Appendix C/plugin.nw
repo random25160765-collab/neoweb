@@ -48,15 +48,14 @@ tangle/editor/package.json @
 tangle/editor/package.json @
 
 << manifest >>= @
-@long
 	{
-	  "//": "由 editor/plugin.nw 生成，请勿手改",
 	  "name": "nw",
-	  "displayName": "Neoweb (.nw)",
-	  "description": "文学化编程文件 .nw：chunk 定义与引用着色、chunk 体按产物后缀着色、@todo 标记、片段模板。",
+	  "displayName": "Better Neoweb",
+	  "description": "Neoweb 文学编程软件的ide配套插件。",
+	  "icon": "./icons/icon.png",
 	  "version": "0.1.1",
-	  "publisher": "neoweb",
-	  "license": "MIT",
+	  "publisher": "random25160765-collab",
+	  "license": "GPL-3.0-or-later",
 	  "main": "./extension.js",
 	  "activationEvents": [
 	    "onLanguage:nw"
@@ -119,6 +118,14 @@ tangle/editor/package.json @
 	        "when": "editorTextFocus && editorLangId == nw && !suggestWidgetVisible && !editorReadonly"
 	      }
 	    ],
+	    "semanticTokenScopes": [
+	      {
+	        "language": "nw",
+	        "scopes": {
+	          "comment": ["comment.block.nw", "comment"]
+	        }
+	      }
+	    ],
 	    "configurationDefaults": {
 	      "[nw]": {
 	        "editor.wordWrap": "on",
@@ -146,7 +153,59 @@ tangle/editor/package.json @
 	  }
 	}
 ~@
+~@
 
+清单只描述插件在编辑器里的形状，不描述它怎么发布。发布还要三样东西：一份 **README**（商店页面就是它）、一份 **LICENSE**（仓库那条 GPL 不许在包里缺席）、一份 **`.vscodeignore`**（生成器是开发用的，不该跟着安装包走）。
+
+README 与 ignore 也是产物：它们描述的是这个包，改包就得改它们，放进 `.nw` 才不会各长各的。LICENSE 例外——许可证是仓库级事实，包里只该有它的副本，所以由构建从根目录拷一份，不在这里存第二份。
+
+tangle/editor/README.md @
+
+<< readme >>= @
+	# Better Neoweb
+
+	Neoweb 文学编程软件的 IDE 配套插件：`.nw` 文件的语法高亮、块体着色、补全与回车便利。
+
+	## 它做什么
+
+	- 主语法：块头、引用、`~@`、`@todo`、双链——颜色跟着编辑器主题走
+	- 注入语法：块体按产物后缀（`.c`、`.py`、`.ts`…）借用对应语言的着色
+	- 语义着色：在 TextMate 之上再分一层"这段是散文、这段是代码、这段是注释"
+	- 补全：`<<` 里补本文档已定义的块名，行首 `@` 补 `@after:` / `@before:` / `@todo:`
+	- 回车：块头行尾按回车，自动补一层缩进和一行 `~@`
+
+	## 安装
+
+	从 VSIX 装（`make vsix` 产出的文件名就是 `nw-版本号.vsix`）：
+
+	    code --install-extension nw-0.1.1.vsix
+
+	开发时不用打包，直接把这个目录软链进扩展目录：
+
+	    make ext
+
+	## 依赖
+
+	语义着色要两个 Node 包（`vscode-textmate`、`vscode-oniguruma`）和一份语法集（`tm-grammars`）。
+	仓库不带 `node_modules`，第一次先跑：
+
+	    make deps
+
+	没装也不会整块失效：语法高亮、补全、回车照常，只有语义着色被跳过，并弹一条提示说明缺什么。
+
+	## 与 nw 的关系
+
+	插件不解析 `.nw`，只负责显示和打字时的便利。结构的真相在 `nw check` 与 `nw tangle` 那一侧——
+	编辑器里看着对，不代表能 tangle；能 tangle，才算对。
+~@
+~@
+
+tangle/editor/.vscodeignore~ @
+
+<< vscodeignore >>= @
+	# 生成器不进包：它生成的是语法文件，装机之后没人会再跑它。
+	tools/**
+~@
 ~@
 
 ## 二、语言配置
@@ -160,9 +219,7 @@ tangle/editor/package.json @
 tangle/editor/language-configuration.json @
 
 << language config >>= @
-@long
 	{
-	  "//": "由 editor/plugin.nw 生成，请勿手改",
 	  "wordPattern": "(<<[^<>\\n]+>>)|([\\w\\u4e00-\\u9fa5]+)",
 	  "brackets": [
 	    [
@@ -257,7 +314,6 @@ tangle/editor/snippets/nw.json @
 
 << snippets >>= @
 	{
-	  "//": "由 editor/plugin.nw 生成，请勿手改",
 	  "chunk": {
 	    "prefix": "chunk",
 	    "body": [
@@ -308,8 +364,6 @@ tangle/editor/syntaxes/nw-injection.tmLanguage.json @
 	  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
 	  "name": "Neoweb Injection",
 	  "scopeName": "nw.injection",
-	  "//": "宿主语言（C++ 的 namespace、Python 的三引号…）会开自己的区域，把块头和 ~@ 一起吞进去。",
-	  "//2": "块级规则在里面看不见，只有注入能穿透。所以这三条必须留在这里。",
 	  "injectionSelector": "L:meta.embedded.block",
 	  "patterns": [
 	    {
@@ -365,8 +419,6 @@ tangle/editor/syntaxes/nw-injection.tmLanguage.json @
 tangle/editor/tools/gen-grammar.js @
 
 << gen-head >>= @
-	// 由 editor/plugin.nw 生成，请勿手改。
-	//
 	// 生成 syntaxes/nw.tmLanguage.json。
 	// 这一层只认结构：命名空间、块头、引用、终止符。语言不在语法里，
 	// 因为语言语法开的区域会吞掉 ~@，把后面整章正文吃成那种语言（见第六章）。
@@ -384,7 +436,6 @@ chunk 头的正则里有十个捕获组（多出来的是路径、冒号与尾�
 `...` 是 JavaScript 的展开运算符：把一个对象的键值原样铺进另一个对象。这里它替代了"复制粘贴十行捕获组"。
 
 << head-captures >>= @
-@long
 	// 命名空间的开层 `名字 @`：1 空白 | 2 路径 | 3 空白 | 4 @
 	// 那个 @ 落在 keyword.control.chunk.* 族里：它是段落边界，插件把这一族钉成深紫。
 	// 但不能复用块收尾的 scope——解析层找收尾时靠的正是那个名字，命名空间行会被误当成 ~@。
@@ -463,7 +514,6 @@ chunk 头的正则里有十个捕获组（多出来的是路径、冒号与尾�
 命名空间那一族记号也不认"一行一个"：`src @ weave @ markdown.cpp @` 是三层，`~@~@~@` 是连关三层，`~@ markdown.cpp ~@ weave ~@ src` 是带名字核对地关。判据与解析层的 `read_namespace` 一样——**整行除了记号不许有别的东西**——所以那几条规则的尾巴都挂一个预查，把"行尾之前只剩记号"写死。少了它，「见 src @ 那一节」这种散文会被开成一层，后面整篇的结构跟着错位。开层规则的锚点也因此不能写行首：第二层以后都落在行的中间，只能靠"记号前面不是别的东西"这个更弱的条件。两个细节是踩出来的：开层与收尾都要吃掉前头的空白，否则 Markdown 的段落规则会比下一个记号更早命中，一行被劈成"第一个记号 + 一大段散文"。
 
 << structure >>= @
-@long
 	// **语法这一层只认结构，不含任何语言。**
 	//
 	// 语言语法会开自己的区域（C++ 的 `namespace nw {` 一直到 `}`），区域一开，
@@ -567,10 +617,21 @@ const todoRule = {
   }
 };
 
+````
+// `%%` 是注释：解析时按行成对挖掉，tangle 与 weave 的产物里都不出现。
+// 编辑器里把它灰掉，是为了写的时候看得见"这一段不进产物"。颜色不写死，交给 comment scope，
+// 灰的深浅仍由主题决定——换主题，注释跟着变，不会有第二种灰。
+const commentRule = {
+  comment: "注释：%% … %%（解析时挖掉，不进任何产物）",
+  match: "%%[^\\n]*?%%",
+  name: "comment.block.nw"
+};
+````
+
 repository["directive"] = directiveRule;
 repository["todo"] = todoRule;
 
-const fallbackRules = [directiveRule, todoRule];
+const fallbackRules = [commentRule, directiveRule, todoRule];
 ~@
 
 ### 5.5 组装与写出
@@ -625,7 +686,6 @@ tangle/editor/tokenize.js @
 
 << tokenize.js >>= @
 
-	// 由 tangle/editor/plugin.nw 生成，请勿手改。
 	// 解析层：把文本变成 token，只回答"这几个字符是什么"，不回答"它是什么颜色"。
 	//
 	// 三样东西都是别人的：vscode-textmate 是微软的 TextMate 解释器（VS Code 自己用的就是它），
@@ -805,14 +865,15 @@ tangle/editor/tokenize.js @
 
 ~@
 
-切块这件事，一行正则也没有：三个 scope 名字就是和语法层的全部接口。判断顺序必须是"先看块头、再看收尾，最后才看产物路径"：块头那一行里也有路径，先按路径处理的话，块的深度根本不会加。
+注释是唯一不属于任何语言的东西：`%%…%%` 是 nw 的语法，而 C 会把两个百分号读成取模。所以交给语言之前先遮住——按行成对找，换成等长空白（列位置不变，注释里的引号带不坏后半行），token 回来时再把那段区间补上 `comment.block.nw`。这与 tangle 的剥离是同一条规矩，区别只在于这里不删、只遮：产物里没有它，编辑器里要有它。
+
+切块这件事，一行正则也没有：几个 scope 名字就是和语法层的全部接口。判断顺序必须是"先看块头、再看收尾，最后才看产物路径"：块头那一行里也有路径，先按路径处理的话，块的深度根本不会加。
 
 块头与引用共用 `<<` 的 scope，分不清就会出事：顶格一行 `<< x >>` 是引用，却会被当成开块，后面整段正文都被算成"块体"送去给 C++ 读。所以判据是**有没有 `=`**——有 = 开块，没有 = 引用；引用那一行也不进 token 列表，因为它不是代码（tangle 会把被引的块整个展开到这儿）。
 
 产物路径有两个来源，缺一个就有文件整篇白着：块头里的 `<<路径: 名字>>`，以及命名空间行的 `路径 @`。两处用的是同一个 scope，所以这一层不必再拆冒号——拆分在语法层就做完了（单个冒号是分隔符，`::` 是块树分级、属于名字）。纯片段没有路径，沿用上一个已知的。
 
 << 切块 >>= @
-@long
 
 	// 结构层留下的三个 scope 只在这里出现一次。
 	const PATH = "string.unquoted.path.nw";
@@ -830,8 +891,37 @@ tangle/editor/tokenize.js @
 	  return hit;
 	};
 
+	// 注释的 scope 与语法层同名：灰的深浅由主题决定，这里不写色值。
+	const COMMENT = "comment.block.nw";
+
+	````
+	// nw 的注释 `%%…%%` 归结构，不归语言：C 会把这两个百分号读成取模。
+	// 规矩与 tangle 一样——按行成对、不跨行。这里不删掉，而是换成等长空白再交给语言：
+	// 列位置不变，注释里的引号也就带不坏后面那半行。
+	const mask_comments = (line) => {
+	  const spans = [];
+	  let at = 0;
+	  for (;;) {
+	    const a = line.indexOf("%%", at);
+	    if (a < 0) break;
+	    const b = line.indexOf("%%", a + 2);
+	    if (b < 0) break;
+	    spans.push([a, b + 2]);
+	    at = b + 2;
+	  }
+	  if (!spans.length) return { masked: line, spans };
+	  let out = "";
+	  let cut = 0;
+	  for (const [a, b] of spans) {
+	    out += line.slice(cut, a) + " ".repeat(b - a);
+	    cut = b;
+	  }
+	  return { masked: out + line.slice(cut), spans };
+	};
+	````
+
 	// 整篇文本 → token 列表（行号、列号都是绝对的）。
-	// 结构问语法要，token 问 textmate 要；这一层没有正则，也没有颜色。
+	// 结构问语法要，token 问 textmate 要；这一层没有语言规则，也没有颜色。
 	async function tokens(text) {
 	  const registry = await boot();
 	  const own = await registry.loadGrammar("source.nw");
@@ -848,9 +938,26 @@ tangle/editor/tokenize.js @
 	    from = -1;
 	    const scope = scopeOf(grammarNameOf(target || ""));
 	    if (!scope) return;
-	    const body = await tokenizeBody(registry, scope, lines.slice(begin, to + 1).join("\n"));
+	    const seg = lines.slice(begin, to + 1);
+	    const masked = [];
+	    const marks = [];
+	    for (const line of seg) {
+	      const m = mask_comments(line);
+	      masked.push(m.masked);
+	      marks.push(m.spans);
+	    }
+	    const body = await tokenizeBody(registry, scope, masked.join("\n"));
 	    for (const t of body) {
+	      // 落在注释区间里的 token 是语言的误读（两个百分号被当成取模），丢掉。
+	      const spans = marks[t.line] || [];
+	      if (spans.some(([a, b]) => t.start < b && a < t.end)) continue;
 	      out.push({ line: begin + t.line, start: t.start, end: t.end, scopes: t.scopes });
+	    }
+	    // 注释本身补回来：语言看不见它，但编辑器要看见。
+	    for (let i = 0; i < marks.length; i += 1) {
+	      for (const [a, b] of marks[i]) {
+	        out.push({ line: begin + i, start: a, end: b, scopes: [scope, COMMENT] });
+	      }
 	    }
 	  };
 
@@ -889,8 +996,10 @@ tangle/editor/tokenize.js @
 	    if (depth > 0 && from < 0) from = i;
 	  }
 	  await flush(lines.length - 1);
+	  // 注释 token 是后补的，推入时必然乱序；语义 token 必须按行列递增。
+	  out.sort((a, b) => a.line - b.line || a.start - b.start);
 	  return out;
-	}
+	  }
 
 	module.exports = { tokens: tokens };
 
@@ -913,9 +1022,7 @@ tangle/editor/tokenize.js @
 tangle/editor/classify.js @
 
 << classify.js >>= @
-@long
 
-	// 由 tangle/editor/plugin.nw 生成，请勿手改。
 	// 渲染层：scope → 语义类型。没有颜色，也没有主题文件。
 	//
 	// 客户端拿到类型之后自己往下走：类型 → 默认 scope → 当前主题的 tokenColors。
@@ -1006,14 +1113,22 @@ tangle/editor/classify.js @
 tangle/editor/extension.js @
 
 << extension.js >>= @
-@long
 
-	// 由 tangle/editor/plugin.nw 生成，请勿手改。
 	// 装配层：把解析层的 token 编码成语义 token 注册上去；另外挂两件打字时的便利（补全、回车）。
 	// 这一层没有语言规则，也没有色值。
 	const vscode = require("vscode");
-	const { tokens } = require("./tokenize");
 	const { TYPES, classify } = require("./classify");
+
+	// 语义着色的两个引擎（oniguruma / textmate）是 runtime 依赖，不在仓库里。
+	// 缺了它们，require 会在加载阶段直接抛——扩展于是整块不激活，编辑器里一声不吭。
+	// 所以这里兜住：拿不到就降级，TextMate 语法、补全、回车照旧；activate 里再把原因说出来。
+	let tokens = null;
+	let tokenizeError = null;
+	try {
+	  tokens = require("./tokenize").tokens;
+	} catch (e) {
+	  tokenizeError = e;
+	}
 
 	// 下标即编号：这个数组的顺序不能动，否则已注册的编号会全部错位。
 	const legend = new vscode.SemanticTokensLegend(TYPES, []);
@@ -1117,11 +1232,20 @@ tangle/editor/extension.js @
 
 	function activate(context) {
 	  context.subscriptions.push(
-	    vscode.languages.registerDocumentSemanticTokensProvider({ language: "nw" }, provider, legend),
 	    vscode.languages.registerCompletionItemProvider({ language: "nw" }, completion, "<", "@"),
 	    vscode.commands.registerCommand("nw.enter", enter)
 	  );
-	  console.log("neoweb: 第二层已激活（scope 由 TextMate 给，颜色由编辑器按主题上）", {
+	  if (tokens) {
+	    context.subscriptions.push(
+	      vscode.languages.registerDocumentSemanticTokensProvider({ language: "nw" }, provider, legend)
+	    );
+	  } else {
+	    // 静默失效比失效本身更坏：让人知道缺什么、去哪儿补。
+	    vscode.window.showErrorMessage(
+	      "Neoweb：语义着色未启用（" + tokenizeError.message + "）。在 tangle/editor 下跑 npm install，然后重载窗口。"
+	    );
+	  }
+	  console.log("neoweb: 已激活（scope 由 TextMate 给，颜色由编辑器按主题上）", {
 	    theme: vscode.workspace.getConfiguration("workbench").get("colorTheme"),
 	    semanticHighlighting: vscode.workspace.getConfiguration("editor").get("semanticHighlighting.enabled")
 	  });
@@ -1145,7 +1269,6 @@ tangle/editor/tools/tokens.js @
 
 << tokens tool >>= @
 
-	// 由 tangle/editor/plugin.nw 生成，请勿手改。
 	// 调试用：不开编辑器也能看见"这篇 .nw 里每个 token 的 scope，以及它被归到哪一类"。
 	//
 	//   node tangle/editor/tools/tokens.js "book/Chapter 2/1-syntax.nw"

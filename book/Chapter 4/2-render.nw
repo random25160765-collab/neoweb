@@ -87,7 +87,6 @@ CSS 内联在输出里，不引外部文件：一份 HTML 就是一个文件，�
 版式是两栏：`aside.toc` 在左，`main.page` 在右。为什么是两栏、为什么侧栏用 `sticky` 而不是 `fixed`，见 2.6.2——那是导航的问题，不是配色的问题。
 
 << css >>= @
-@long
 	// 内联样式表。存在的理由是"一份 HTML 就是一份文件"，
 	// 拷到任何地方都能看，不依赖同目录的 css。
 	static const char* css() {
@@ -145,14 +144,26 @@ CSS 内联在输出里，不引外部文件：一份 HTML 就是一个文件，�
 	span.ref { color: #a4463c; font-weight: 600; }
 	aside.todo { margin: 1.2rem 0; padding: .6rem .9rem; font-size: .92rem;
 	             border-left: 3px solid #d8a657; background: #fdf6e6; border-radius: 0 6px 6px 0; }
-	aside.callout { margin: 1.3rem 0; padding: .7rem 1rem; font-size: .95rem;
+	aside.callout, details.callout { margin: 1.3rem 0; padding: .7rem 1rem; font-size: .95rem;
 	                border-left: 3px solid #9fb3c8; background: #f4f7fa; border-radius: 0 6px 6px 0; }
-	aside.callout p { margin: 0 0 .45rem; }
-	aside.callout p:last-child { margin-bottom: 0; }
+	details.callout > summary { cursor: pointer; }
+	details.callout[open] > summary { margin-bottom: .45rem; }
+	aside.callout p, details.callout p { margin: 0 0 .45rem; }
+	aside.callout p:last-child, details.callout p:last-child { margin-bottom: 0; }
 	.callout-title { font-weight: 600; }
-	.callout-warn { border-left-color: #c9743c; background: #fdf3e9; }
-	.callout-tip { border-left-color: #6b9e78; background: #eef6f0; }
-	.callout-danger { border-left-color: #a4463c; background: #fbf0ef; }
+	.callout-note     { border-left-color: #5a7d95; background: #f1f5f7; }
+	.callout-abstract { border-left-color: #4f8f8a; background: #eef6f5; }
+	.callout-info     { border-left-color: #4a7ba6; background: #eff4f9; }
+	.callout-todo     { border-left-color: #5b83b5; background: #eef3fa; }
+	.callout-tip      { border-left-color: #6b9e78; background: #eef6f0; }
+	.callout-success  { border-left-color: #55895f; background: #ecf4ee; }
+	.callout-question { border-left-color: #b8863f; background: #fbf4e8; }
+	.callout-warning  { border-left-color: #c9743c; background: #fdf3e9; }
+	.callout-failure  { border-left-color: #b05046; background: #fbf1ef; }
+	.callout-danger   { border-left-color: #a4463c; background: #fbf0ef; }
+	.callout-bug      { border-left-color: #9c4a52; background: #f9eef0; }
+	.callout-example  { border-left-color: #7a6aa6; background: #f3f0fa; }
+	.callout-quote    { border-left-color: #8a9099; background: #f4f5f6; }
 	span.math { font-family: "Latin Modern Math", "STIX Two Math", serif; }
 	div.math-block { margin: 1rem 0; padding: .4rem 0; text-align: center; overflow-x: auto; }
 	math { font-size: 1.05em; }

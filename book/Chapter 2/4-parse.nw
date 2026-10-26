@@ -33,7 +33,7 @@ tangle/parse.cpp @
 		<< chunk-path >>
 		<< body-boundary >>
 		<< directive_after >>
-		<< directive_long >>
+		<< directive_todo >>
 	~@
 	<< machine >>= @
 		<< parser-state >>
@@ -51,7 +51,6 @@ tangle/parse.cpp @
 	<< entry >>= @
 		<< strip-comments >>
 		<< parse >>
-		<< lint >>
 	~@
 
 	}  // namespace nw
@@ -101,7 +100,6 @@ tangle/parse.cpp @
 `chunk_head` 认头，返回三种结果：不是头、是头、有 `{` 但缺 `=`（这是错，赋值必须写等号）。它同时把名字与路径拆开——注意只有**单个**冒号才是"路径: 名字"的分隔符，`::` 是块树的分级，属于名字本身。
 
 << chunk_head >>= @
-@long
 	// 认头：`<< inner >>` 之后可以是 `=`（v1，体到顶格 @）或 `{`（v2，体到配对 }）。
 	// tail 是 `{` 之后同一行里剩下的内容——它可能已经是体的一部分，也可能是空的。
 	// 体里单独一行的 `<< 名字 >>= {`：它定义一个子块，不是体的一部分。
@@ -187,14 +185,14 @@ tangle/parse.cpp @
 	}
 ~@
 
-`@long` 是另一种修饰符：**开关**，不是顺序。它不带参数、不说"排在哪"，只说"这个块长是有意的，别再为长度提意见"。所以判定只有一行——顶格、整行就是它。
-
-写成"体里顶格"而不是"写在块头上"，是为了与 `@after` 一致：修饰符都住在被修饰的块**自己身上**，而不是块头的尾巴上。块头的语法已经够挤了。
-
-<< directive_long >>= @
-	// 顶格的 `@long`：压住"块太长"这条警告。开关式修饰符，没有参数。
-	static bool directive_long(const string& ln) {
-		return leading_ws(ln) == 0 && trim(ln) == "@long";
+<< directive_todo >>= @
+	// 体里顶格的 `@todo:` 是一句"还没写完"：摘出来，整块就不落盘。
+	// 与 @after 同一条规矩——修饰符住在被修饰的块自己身上，不写在块头尾巴上。
+	static bool directive_todo(const string& ln, Chunk& c) {
+		if (leading_ws(ln) != 0) return false;
+		if (!has_prefix(ln, "@todo:")) return false;
+		c.todo = true;
+		return true;
 	}
 ~@
 
@@ -202,7 +200,6 @@ tangle/parse.cpp @
 `body-boundary` 管两件相关的事：v1 的终止符（顶格 `@`）与公共缩进的剥离。两条都是"体的边界"，拆开写会让读者来回翻。
 
 << body-boundary >>= @
-@long
 	// `~@` 关"最近打开的那一层"，缩进不影响；`@` 是老写法，必须顶格。
 	static bool terminator(const string& ln) {
 		string t = trim(ln);
@@ -293,7 +290,6 @@ tangle/parse.cpp @
 机器要有记忆：读到第几行、读到这一行的第几列（块头可以出现在句子中间）、攒了哪些散文、在不在围栏里、命名空间栈有多深、是不是正在读某个块的体（体里的块是子块）。
 
 << parser-state >>= @
-@long
 	// 一台带状态的机器：读到哪、攒了什么、在不在围栏里。
 	// 位置 p 是否落在行内反引号里（奇数个反引号 = 在里面）。
 	// 书稿里到处是 `<<x>>` 这种行内引用，不挡住会被当成真的块头。
@@ -363,7 +359,7 @@ tangle/parse.cpp @
 
 散文可能是**半行**：一句"先导入头文件 `<< inc >>= { … }`，然后是 main"里，块头把句子切成前后两段。两段要拼回同一行，否则一句话会变成两段。
 
-> [!warn] 空行也是语法
+> [!warn]+ 空行也是语法
 > weave 把散文整段交给 cmark，而 cmark 靠空行判断段落与表格在哪结束。空行一丢，两张表会粘成一张，表后的正文会被当成表行。
 >
 > 这类错误不报错：页面照样生成，只是形状变了。所以"整理空行"在这套语法里是删语法，不是排版。
@@ -456,7 +452,6 @@ tangle/parse.cpp @
 v2 的体还会做一件 v1 没有的事：**体里出现块头就递归读成子块**。子块的内容不进外层体，原处留一个占位；子块也不单独落盘（`body_depth` 一关）。这就是"块里套块"的实现，也是这本书自己用的写法。
 
 << parser-chunk >>= @
-@long
 	// chunk 头：先落掉前面的散文，再把体收完，最后登记成节点。
 	bool Parser::read_chunk() {
 		string ln = lines[i].substr(col);
@@ -599,10 +594,7 @@ v2 的体还会做一件 v1 没有的事：**体里出现块头就递归读成�
 			vector<string> bl = split_lines(body);
 			for (size_t k = 0; k < bl.size(); ++k) {
 				if (directive_pos(bl[k], c.after, c.before)) continue;
-				if (directive_long(bl[k])) {
-					c.long_ok = true;
-					continue;
-				}
+				if (directive_todo(bl[k], c)) continue;
 				c.body.push_back(bl[k]);
 				c.body_lines.push_back(k < nos.size() ? nos[k] : line_no);
 			}
@@ -652,9 +644,7 @@ v2 的体还会做一件 v1 没有的事：**体里出现块头就递归读成�
 					++i;
 					continue;
 				}
-				// @long 同理：它是给 lint 看的，不是产物的一部分。
-				if (directive_long(lines[i])) {
-					c.long_ok = true;
+				if (directive_todo(lines[i], c)) {
 					++i;
 					continue;
 				}
@@ -740,7 +730,6 @@ v2 的体还会做一件 v1 没有的事：**体里出现块头就递归读成�
 命名空间一行可以写好几层，也可以把 `~@` 连着写；与缩进、换行无关。写法只有一种：`名字 @`——路径在前、`@` 在后，写成 `@ 名字` 会当场报错（那是修饰符的形状，不是开层）。`~@` 后面可以跟名字核对，只写最后一段也算对上。
 
 << parser-namespace >>= @
-@long
 	// 命名空间前缀：栈里各级用 / 连起来。空栈 = 不在任何命名空间里。
 	string Parser::ns_prefix() const {
 		string out;
@@ -757,8 +746,8 @@ v2 的体还会做一件 v1 没有的事：**体里出现块头就递归读成�
 		string t = trim(ln);
 		if (t.empty()) return false;
 		if (has_prefix(t, "@todo:")) return false;      // 待办
-		if (has_prefix(t, "@after:") || has_prefix(t, "@before:") || t == "@long")
-			throw Error(file, static_cast<int>(i) + 1, "@after / @before / @long 要写在 chunk 体内");
+		if (has_prefix(t, "@after:") || has_prefix(t, "@before:"))
+			throw Error(file, static_cast<int>(i) + 1, "@after / @before 要写在 chunk 体内");
 		if (t == "@") return false;                     // v1：顶格 @ 是块终止符
 
 		int line_no = static_cast<int>(i) + 1;
@@ -865,7 +854,12 @@ v2 的体还会做一件 v1 没有的事：**体里出现块头就递归读成�
 	}
 ~@
 
-待办是给 weave 的：`@todo:` 顶格写，单独成一个节点，里面记"还没做的事"。tangle 不看它，但解析阶段必须把它和散文分开——否则它会渲染成正文。
+顶格的 `@todo:` 有两个位置，含义不同：
+
+- **散文里**：单独成一个节点，weave 渲染成醒目块。tangle 不看它，但必须先把它从散文里摘出来——否则它会渲染成正文。
+- **块体里**：是修饰符，意思是"这块还没写完"，整块不落盘。占位块若落盘，会生成一个空文件，而下一次编译就会去找它——空文件比没有文件更难查。
+
+两条判据都是"顶格"，所以嵌套块体里缩进的 `@todo:` 仍算代码：缩进是内容的一部分，不归结构管。
 
 << parser-todo >>= @
 	// 待办：单独成节点。tangle 不管它，weave 渲染成醒目块。
@@ -967,34 +961,6 @@ v2 的体还会做一件 v1 没有的事：**体里出现块头就递归读成�
 		p.file = file;
 		p.lines = strip_comments(split_lines(src), file);
 		return p.run();
-	}
-~@
-
-## 四、lint：只提意见，不改产物
-
-`lint` 与 `parse` 是两条路：后者造结构，前者只在结构上走一遍、攒一串警告。放在解析层而不是 tangle 里，因为"块太长"与落盘无关——纯片段也会长。
-
-现在只有一条规则：体超过 50 行的块报 warn。长不是错：一条两百行的 `switch`、一段 CSS、一个状态机，硬拆反而更难读。所以判据只到"这里长，你确认一下"为止，回答由作者给——体里写一行 `@long`。
-
-阈值是写死的常量，不做配置项。配置项意味着每个项目一套标准；而这里要的是一条能写进规范的判据。
-
-<< lint >>= @
-	// 语法层的风格检查：只提警告，不改产物。
-	// 现在只有一条规则：块太长。它不判断"该不该拆"——那是作者的事，@long 就是回答。
-	constexpr size_t kLongChunk = 50;
-
-	vector<Warn> lint(const Document& doc, const string& file) {
-		vector<Warn> out;
-		for (const auto& c : doc.chunks) {
-			if (!c.defined || c.long_ok) continue;   // 占位没有体；@long 已经作答
-			if (c.body.size() <= kLongChunk) continue;
-			string who = c.path.empty() ? c.name : c.path + " 的 " + c.name;
-			out.push_back(Warn{c.src_file.empty() ? file : c.src_file, c.line,
-			                   "块太长（" + std::to_string(c.body.size()) + " 行，超过 " +
-			                       std::to_string(kLongChunk) + "）：" + who +
-			                       "（有意的话，体里写 @long）"});
-		}
-		return out;
 	}
 ~@
 

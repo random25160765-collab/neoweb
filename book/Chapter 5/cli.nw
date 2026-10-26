@@ -299,7 +299,6 @@ tangle/main.cpp @
 		if (!hit->source.empty()) {
 			// 始终开 --debug：run 的存在就是为了调试，错误指回 .nw 才有意义。
 			Document doc = parse(read_file(hit->source), hit->source);
-			for (const auto& w : lint(doc, hit->source)) std::cerr << w.where() << "\n";
 			for (const auto& p : tangle(doc, hit->source, true)) write_file(p.path, join_lines(p.lines));
 		}
 		int st = std::system(hit->run.c_str());
@@ -322,7 +321,6 @@ tangle/main.cpp @
 篇幅说明：`main.nw` 里含 `<<`，直接写进块体，解析器会把它当成嵌套的块头。所以下面用围栏把整段内容包起来——栏本身不落盘，栏内原样（见 S1.3）。
 
 << cmd-init >>= @
-@long
 	// 骨架编进二进制：新用户不该先读这本书才知道语法。
 	// 围栏只在这里当"引号"用：栏内的 << 不是这一章的块。
 	static const char* INIT_NW = R"NW(# 我的第一篇
@@ -343,9 +341,7 @@ tangle/main.cpp @
 	```
 	)NW";
 
-	static const char* INIT_MAKEFILE = R"MK(# 由 `nw init` 生成。
-
-	NW ?= nw
+	static const char* INIT_MAKEFILE = R"MK(NW ?= nw
 
 	all: run
 
@@ -398,7 +394,6 @@ tangle/main.cpp @
 `version` 必须放在参数解析之前：它只有两个参数，走通用解析会被判成"输入为空"。`--version` 与 `-V` 走同一条路——脚本先试 `--version` 是惯例，没有理由让它失败。`--help` 也在这里：它不是"子命令"，是"我不想看用法之外的东西"。
 
 << run >>= @
-@long
 	int run(int argc, char** argv) {
 		// 自报身份与用法不该走通用解析：它们没有输入，也没有目标。
 		if (argc == 2) {
@@ -461,10 +456,6 @@ tangle/main.cpp @
 		auto t1 = std::chrono::steady_clock::now();
 		Document book = merge(docs, a.inputs.front());
 		auto t2 = std::chrono::steady_clock::now();
-
-		// 警告在合并之后打一次：块来自哪一篇，块自己记着（src_file），不必逐篇扫。
-		// 只写 stderr——stdout 是产物清单，混进警告就没法拿管道对账了。
-		for (const auto& w : lint(book, a.inputs.front())) std::cerr << w.where() << "\n";
 
 		int rc = 2;
 		if (a.cmd == "check") rc = cmd_check(book, a);

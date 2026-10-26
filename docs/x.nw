@@ -1,0 +1,263 @@
+写作规范的事情
+
+首先neoweb给人或者agent的发挥空间非常大，这样的好处是表达力强，坏处是如果不小心写出了坏味道，这个味道一般就非常坏。
+
+chunk之间的组合几乎就是宏一样的字符串拼贴，能玩出很多的花活。
+
+首先在之前的章节中，最让人难受的就是长长的代码chunk。neoweb的初心是让人减轻review的负担，我更希望agent在输出的时候，能够像一个在黑板上手写算法的实习生，一边写代码片段一边讲为什么这么写，这么写是什么意思。而人类就是那个架构师。chunk语法是完全可以适应这一点的：一边讲，一边抛出演示代码，然后再组装起来。嵌套chunk是拆解长程序的利器，目的就是把文件拆解成足够细的粒度，方便配合agent讲。
+
+举个例子：反面例子：
+
+<< md-block >>= @
+	// 行内与着色在下面几节定义；先声明，落盘顺序就不必迁就调用顺序。
+	static void md_inline(cmark_node* parent, std::ostringstream& out);
+	static void md_inline_node(cmark_node* n, std::ostringstream& out);
+	static void md_block(cmark_node* n, std::ostringstream& out);
+	static string highlight(const string& code, const string& info); %%这个声明玩意非常的诡异。我们tangle出来的必须是常规repo的写法，你的代码组织必须符合常规，而不是为了文学编程方便——我给了你足够的表达力了。%%
+
+	// cmark 的 literal 对容器节点是 NULL：统一成一个空串，省得每处判空。
+	static string inert(const char* s) { return s ? string(s) : string(); }
+
+	// callout 的类型归一：Obsidian 认的 13 类，别名折到主名上——样式只写 13 份。
+	// 认不出的类型按 note 处理（与 Obsidian 一致）：正文里的一个错字不该挡住整篇。
+	static string callout_kind(const string& raw) {
+		static const char* kAlias[][2] = {
+			{"note", "note"},     {"abstract", "abstract"}, {"summary", "abstract"}, {"tldr", "abstract"},
+			{"info", "info"},     {"todo", "todo"},
+			{"tip", "tip"},       {"hint", "tip"},          {"important", "tip"},
+			{"success", "success"}, {"check", "success"},   {"done", "success"},
+			{"question", "question"}, {"help", "question"}, {"faq", "question"},
+			{"warning", "warning"}, {"warn", "warning"},    {"caution", "warning"}, {"attention", "warning"},
+			{"failure", "failure"}, {"fail", "failure"},    {"missing", "failure"},
+			{"danger", "danger"}, {"error", "danger"},
+			{"bug", "bug"},       {"example", "example"},
+			{"quote", "quote"},   {"cite", "quote"},
+		};
+		for (const auto& a : kAlias)
+			if (raw == a[0]) return a[1];
+		return "note";
+	}
+
+	// 没写标题时用中文类型名：这本书是中文的，没道理让 `[!warning]` 顶着英文 Warning。
+	static string callout_label(const string& kind) {
+		static const char* kLabel[][2] = {
+			{"note", "笔记"},   {"abstract", "摘要"}, {"info", "信息"},    {"todo", "待办"},
+			{"tip", "提示"},    {"success", "完成"},  {"question", "问题"}, {"warning", "警告"},
+			{"failure", "失败"}, {"danger", "危险"},  {"bug", "缺陷"},     {"example", "示例"},
+			{"quote", "引用"},
+		};
+		for (const auto& a : kLabel)
+			if (kind == a[0]) return a[1];
+		return kind;
+	}
+
+	static void md_children(cmark_node* n, std::ostringstream& out) {
+		for (cmark_node* c = cmark_node_first_child(n); c; c = cmark_node_next(c))
+			md_block(c, out);
+	}
+
+	// 块级：按类型名分派。扩展节点（表格）也走同一条路。
+	static void md_block(cmark_node* n, std::ostringstream& out) {
+		const string t = cmark_node_get_type_string(n);
+		if (t == "document") {
+			md_children(n, out);
+			return;
+		}
+		if (t == "paragraph") {
+			// 独占一行的 $$ … $$ 是块级公式：cmark 读成一个段落，首尾各一个 text("$$")。
+			cmark_node* first = cmark_node_first_child(n);
+			cmark_node* last = cmark_node_last_child(n);
+			if (first && last && first != last && inert(cmark_node_get_literal(first)) == "$$" &&
+			    inert(cmark_node_get_literal(last)) == "$$") {
+				out << "<div class=\"math-block\">$$\n";
+				for (cmark_node* c = cmark_node_next(first); c && c != last; c = cmark_node_next(c)) {
+					if (cmark_node_get_type(c) == CMARK_NODE_TEXT)
+						out << html_escape(inert(cmark_node_get_literal(c)));
+					else if (cmark_node_get_type(c) == CMARK_NODE_SOFTBREAK)
+						out << "\n";
+				}
+				out << "\n$$</div>\n";
+				return;
+			}
+			out << "<p>";
+			md_inline(n, out);
+			out << "</p>\n";
+			return;
+		}
+		if (t == "heading") {
+			int lv = cmark_node_get_heading_level(n);
+			out << "<h" << lv << ">";
+			md_inline(n, out);
+			out << "</h" << lv << ">\n";
+			return;
+		}
+		if (t == "block_quote") {
+			// `> [!类型] 标题` 是一次 callout：首段的第一个 text 以 `[!` 起头。
+			// 类型后面紧跟的 `-` / `+` 是折叠开关（与 Obsidian 同）：`-` 默认收起，`+` 默认展开。
+			string kind, title, fold;
+			cmark_node* p0 = cmark_node_first_child(n);
+			if (p0 && string(cmark_node_get_type_string(p0)) == "paragraph") {
+				cmark_node* t0 = cmark_node_first_child(p0);
+				string lit = t0 ? inert(cmark_node_get_literal(t0)) : string();
+				if (lit.size() > 3 && lit.compare(0, 2, "[!") == 0) {
+					size_t rb = lit.find(']');
+					if (rb != string::npos) {
+						kind = callout_kind(trim(lit.substr(2, rb - 2)));
+						// 折叠符在 `]` 外面：`[!note]- 标题`，不是写在类型名里。
+						string after = trim(lit.substr(rb + 1));
+						if (!after.empty() && (after[0] == '-' || after[0] == '+')) {
+							fold = after.substr(0, 1);
+							after = trim(after.substr(1));
+						}
+						title = after;
+					}
+				}
+			}
+			if (kind.empty()) {
+				out << "<blockquote>\n";
+				md_children(n, out);
+				out << "</blockquote>\n";
+				return;
+			}
+			if (title.empty()) title = callout_label(kind);
+			// 只有写了折叠符才用 <details>：普通的 callout 是一段旁注，不该多一次点击。
+			const bool boxed = !fold.empty();
+			out << (boxed ? "<details" : "<aside") << " class=\"callout callout-" << html_escape(kind)
+			    << "\"" << (fold == "+" ? " open" : "") << ">\n";
+			out << (boxed ? "<summary class=\"callout-title\">" : "<p class=\"callout-title\">")
+			    << html_escape(title) << (boxed ? "</summary>\n" : "</p>\n");
+			// 首段里 `[!类型]` 之后的内容跳过那个 text 节点再渲染。
+			cmark_node* rest = cmark_node_first_child(p0);
+			if (rest) rest = cmark_node_next(rest);
+			if (rest) {
+				out << "<p>";
+				for (cmark_node* c = rest; c; c = cmark_node_next(c))
+					md_inline_node(c, out);
+				out << "</p>\n";
+			}
+			md_children(cmark_node_next(p0), out);
+			out << (boxed ? "</details>\n" : "</aside>\n");
+			return;
+		}
+		if (t == "list") {
+			bool ordered = cmark_node_get_list_type(n) == CMARK_ORDERED_LIST;
+			out << (ordered ? "<ol>\n" : "<ul>\n");
+			md_children(n, out);
+			out << (ordered ? "</ol>\n" : "</ul>\n");
+			return;
+		}
+		if (t == "item") {
+			// 紧凑列表里的段落不包 <p>，否则每项都多出一段行距。
+			cmark_node* parent = cmark_node_parent(n);
+			bool tight = parent && cmark_node_get_list_tight(parent);
+			out << "<li>";
+			for (cmark_node* c = cmark_node_first_child(n); c; c = cmark_node_next(c)) {
+				if (tight && string(cmark_node_get_type_string(c)) == "paragraph")
+					md_inline(c, out);
+				else
+					md_block(c, out);
+			}
+			out << "</li>\n";
+			return;
+		}
+		if (t == "code_block") {
+			string info = trim(inert(cmark_node_get_fence_info(n)));
+			string code = inert(cmark_node_get_literal(n));
+			// 图源不在这里画：weave 只负责标注"这是一张图"，画图是构建末尾的事。
+			if (info == "dot" || info == "graphviz") {
+				out << "<pre class=\"dot\">" << html_escape(code) << "</pre>\n";
+				return;
+			}
+			out << "<pre><code>" << highlight(code, info) << "</code></pre>\n";
+			return;
+		}
+		if (t == "table") {
+			// 表头先出（cmark 里它一定是第一个孩子），其余行进 tbody：
+			// 没有 tbody 时，有些浏览器会把表格内容当成游离节点。
+			cmark_node* h = cmark_node_first_child(n);
+			out << "<table>\n";
+			if (h && string(cmark_node_get_type_string(h)) == "table_header") {
+				md_block(h, out);
+				h = cmark_node_next(h);
+			}
+			out << "<tbody>\n";
+			for (cmark_node* r = h; r; r = cmark_node_next(r))
+				md_block(r, out);
+			out << "</tbody>\n</table>\n";
+			return;
+		}
+		if (t == "table_header") {
+			out << "<thead><tr>";
+			md_children(n, out);
+			out << "</tr></thead>\n";
+			return;
+		}
+		if (t == "table_row") {
+			out << "<tr>";
+			md_children(n, out);
+			out << "</tr>\n";
+			return;
+		}
+		if (t == "table_cell") {
+			// 表头格子与数据格子同一个类型：往上找最近的 table_header / table_row。
+			bool head = false;
+			for (cmark_node* p = cmark_node_parent(n); p; p = cmark_node_parent(p)) {
+				string pt = cmark_node_get_type_string(p);
+				if (pt == "table_header") {
+					head = true;
+					break;
+				}
+				if (pt == "table_row") break;
+			}
+			out << (head ? "<th>" : "<td>");
+			md_inline(n, out);
+			out << (head ? "</th>" : "</td>");
+			return;
+		}
+		if (t == "thematic_break") {
+			out << "<hr>\n";
+			return;
+		}
+		if (t == "html_block") {
+			out << inert(cmark_node_get_literal(n));
+			return;
+		}
+	md_children(n, out);   // 不认识的容器：至少别丢内容
+}
+
+	// 散文 → HTML。解析、渲染、释放三行收在一起：
+	// 调用方不必知道 AST 存在，也就不会漏掉 free。
+	static string render_prose(const vector<string>& lines) {
+		cmark_node* doc = md_parse(lines);
+		std::ostringstream out;
+		md_block(doc, out);
+		cmark_node_free(doc);
+		return out.str();
+	}
+
+	// 行内片段：todo 那一行要放进已经开好的容器里，不能多一层 <p>。
+	static string render_inline_prose(const string& s) {
+		string html = render_prose({s});
+		if (has_prefix(html, "<p>") && html.size() >= 8 && html.compare(html.size() - 5, 5, "</p>\n") == 0)
+			return html.substr(3, html.size() - 8);
+		return html;
+	}
+
+~@
+
+如果我们要把它们写成skill，这个是要加入的。仅仅是语法规则本身还不够，还要让agent学会怎么合适地利用这些规则。我们定义的所有语法都有它的理由，最终都服务于文学编程和neoweb的宗旨：降低人与人，人与agent的沟通协作成本。
+
+另外一个需要约束的就是文风的问题。ai的文风晦涩难懂，需要专门用一个skill约束。这个好说，用ASD-STE100之类的就可以：agent尽量少发挥，让人来“画龙点睛”。
+
+补充：
+
+改前：
+
+> 因为 cmark 对容器节点返回 NULL，所以我们如果不做归一，那么每一处判空都会出现，于是代码就会变得很长。
+
+改后：
+
+> cmark 的 literal 对容器节点是 NULL。统一成一个空串，省得每处判空。
+
+————评价：这个简直狗屁不通。你把因为，所以，那么，于是都删掉，那它就完全不像散文，完全不是人说的话了，整段话会变得密不透风，看得很痛苦。不是单位空间内信息密度越大越好，越简洁越好，你要留给人类呼吸的空间。by the way，我觉得ASD那个不合适，那个适合用来写说明书，不适合用来写故事和小说。
+还有，我怀疑你的系统提示词有问题，我们需要

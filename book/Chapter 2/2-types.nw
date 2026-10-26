@@ -27,8 +27,6 @@
 tangle/nw.hpp @
 
 << nw.hpp >>= @
-	// 由 book/Chapter 2/*.nw 生成，请勿手改。
-	//
 	// 这个头文件是模块边界：只有类型与声明，没有实现。
 	// 五个 .cpp 各自 include 它；谁在边界内、谁在边界外，看这一个文件就够。
 	#ifndef NEOWEB_NW_H
@@ -67,7 +65,6 @@ tangle/nw.hpp @
 ~@
 
 << document >>= @
-@long
 	// 一个 chunk：名字、产物路径、体、以及它在源文件里的行号。
 	// body 已经剥掉了最小公共缩进，所以可以直接拼接。
 	struct Chunk {
@@ -80,8 +77,8 @@ tangle/nw.hpp @
 		string src_file;         // 这个块写在哪个 .nw 里（合并多篇后仍要分得清）
 		int line = 0;      // chunk 头所在行号，报错用
 		bool defined = false;  // 有体才算定义过（只有声明的块不许落盘）
+		bool todo = false;     // 体里顶格写了 @todo:——这块还没写完，不落盘
 		bool inside = false;   // 首次提及在别的 chunk 里：位置由那个块决定
-		bool long_ok = false;  // 体里写了 @long：这个块长是有意的，别为长度报警
 	};
 
 	// chunk 的身份是 (路径, 名字) 这个二元组，不是名字本身。
@@ -168,13 +165,11 @@ tangle/nw.hpp @
 
 索引的键不是名字，这一点在第一章定过：`a.c` 的 `merge` 与 `b.c` 的 `merge` 是两个块。用二元组做键，查重的判据和引用解析的判据就统一了。
 
-## 三、错误与警告只要三样
+## 三、错误只要三样
 
 报错信息里只有三件事有用：哪个文件、第几行、什么错。其余都是噪音。
 
-警告是同一个形状，只是**不中断**：退出码照旧是 0，产物照旧写出来。两者的分工很硬——错误是"这份源不成立"，警告是"这份源成立，但你可能没注意到某件事"。
-
-谁负责打印？不在这里。`Error` 与 `Warn` 都只拼字符串，写 stderr 的是命令行那一层。理由是可断言：库函数一旦自己往 stderr 写，测试就只能靠抓管道；把"产生"与"打印"分开，警告才和错误一样能被测。
+谁负责打印？不在这里。`Error` 只拼字符串，写 stderr 的是命令行那一层。理由是可断言：库函数一旦自己往 stderr 写，测试就只能靠抓管道；把"产生"与"打印"分开，错误才和普通返回值一样能被测。
 
 << error >>= @
 	// 错误只带三样：哪个文件、第几行、什么错。
@@ -194,20 +189,7 @@ tangle/nw.hpp @
 		}
 	};
 
-	// 警告与错误同形，只多一个 warn: 前缀——编辑器点得开，grep 分得清。
-	struct Warn {
-		string file;
-		int line = 0;
-		string msg;
-
-		string where() const {
-			if (line > 0) return file + ":" + std::to_string(line) + ": warn: " + msg;
-			return file + ": warn: " + msg;
-		}
-	};
 ~@
-
-警告的来源只有一类：**语法层的风格**（现在只有"块太长"这一条）。它不依赖产物、不依赖落盘，所以放在 `parse.cpp` 里对整份文档扫一遍，叫 `lint`——名字借自编译器社区，做的是同一件事。
 
 ## 四、接口：按阶段分组
 
@@ -232,8 +214,6 @@ tangle/nw.hpp @
 	Document parse(const string& src, const string& file);
 	bool fence_open(const string& ln, string& run);
 	bool fence_close(const string& ln, const string& run);
-	// 语法层的风格检查：只提警告，不改产物。谁打印由调用方决定。
-	vector<Warn> lint(const Document& doc, const string& file);
 
 	// ---- 展开与组装（tangle.cpp）----
 	bool ref_line(const string& ln, string& name, string& indent);

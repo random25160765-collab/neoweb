@@ -133,7 +133,6 @@ nw check sort.nw    # 试试手
 变量区：编译器、工具、路径。全部用 `?=` 而不是 `=`——外部（交叉编译、CI 换编译器）可以用环境变量覆盖，不必改文件。
 
 <<tangle/Makefile~: preamble>>= @
-	# 由 book/Appendix A/construct.nw 生成，请勿手改。
 	# 由顶层 Makefile 的入口转发进来：make -f tangle/Makefile <目标>
 	# 工作目录始终是仓库根，所有路径都是仓库相对的。
 
@@ -153,7 +152,10 @@ nw check sort.nw    # 试试手
 	PREFIX   ?= $(HOME)/.local
 	BINDIR   ?= $(PREFIX)/bin
 	MANDIR   ?= $(PREFIX)/share/man/man1
-	EXTDIR   ?= $(HOME)/.codebuddy-server-cn/extensions/neoweb.nw-0.1.0
+	# 扩展目录名带版本，而版本只由 package.json 说了算：写死过 0.1.0，包却已是 0.1.1，
+	# 软链就落到一个不存在的版本上，IDE 里出现两份同 id 的扩展，谁生效说不清。
+	EXTVER  := $(shell node -p "require('./tangle/editor/package.json').version" 2>/dev/null)
+	EXTDIR  ?= $(HOME)/.codebuddy-server-cn/extensions/random25160765-collab.nw-$(EXTVER)
 
 	# 章节目录名里带空格（书的样子），所以路径要分别处理两种形态：
 	# 依赖行用反斜杠转义（make 需要），recipe 里用引号（shell 需要）。
@@ -167,7 +169,7 @@ nw check sort.nw    # 试试手
 	# 处理器的源码分散在四章里：条款、类型、工具、解析（第 2 章）、tangle（第 3 章）、
 	# weave（第 4 章）、tutorial 与命令行（第 5 章）。
 	# tangle 时按这个顺序合并——顺序就是 C++ 里"先声明后使用"的顺序。
-	# 语法指南只有散文与示例，不产生产物；语法条款要产契约测试，所以在清单里。
+	# 语法篇要产契约测试（tangle/tests/test_spec.py），所以在清单里。
 	# 命令表不在清单里：它是附录 A 控制面的产物，不由这本书的程序产出。
 	# 引号形态给 shell，反斜杠形态给 make 的依赖行，两者不能混。
 	PROC = "book/Chapter 2/1-syntax.nw" "book/Chapter 2/2-types.nw" "book/Chapter 2/3-util.nw" "book/Chapter 2/4-parse.nw" "book/Chapter 3/tangle.nw" "book/Chapter 4/1-markdown.nw" "book/Chapter 4/2-render.nw" "book/Chapter 4/3-site.nw" "book/Chapter 4/4-book.nw" "book/Chapter 5/tutorial.nw" "book/Chapter 5/cli.nw"
@@ -205,6 +207,8 @@ nw check sort.nw    # 试试手
 	            tangle/editor/tools/tokens.js \
 	            tangle/editor/icons/nw.svg \
 	            tangle/editor/icons/nw-dark.svg \
+	            tangle/editor/README.md \
+	            tangle/editor/.vscodeignore \
 	            tangle/Makefile \
 	            tangle/command.yaml \
 	            tangle/nw.1 \
@@ -212,7 +216,7 @@ nw check sort.nw    # 试试手
 	            tangle/tools/enhance.cpp \
 	            tangle/tests/test_spec.py
 
-	.PHONY: all nw install plugin deps build-files grammar html tools serve ext selfhost crosscheck examples hello pair fragment sort check test verify scratch clean
+	.PHONY: all nw install plugin deps build-files grammar html tools serve ext vsix selfhost crosscheck examples hello pair fragment sort check test verify scratch clean
 
 ~@
 
@@ -237,7 +241,7 @@ nw check sort.nw    # 试试手
 		@$(NW) weave -o weave
 		@tangle/build/enhance weave
 
-	# 目录是目录章的产物：改了 menu.nw，这几行自己长出来，别手改 book.yaml。
+	# 目录：目录章展开出 book.yaml。
 	tangle/tools/book.yaml: $(NW) book/menu.nw
 		$(NW) tangle -o . book/menu.nw
 
@@ -302,12 +306,28 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 
 ~@
 
-编辑器插件的十一个产物一次展开：清单、语言配置、片段、注入语法、语法生成器、解析层、渲染层、装配脚本、调试命令、两个图标。
+编辑器插件的产物一次展开：清单、语言配置、片段、注入语法、语法生成器、解析层、渲染层、装配脚本、调试命令、两个文件图标，以及商店页要用的 README 与忽略清单。
+
+两样东西不展开、但也不手写：`LICENSE` 与商店图标。前者是仓库级事实（GPL），包里只该有副本；后者是位图，tangle 只搬文字。所以构建时从根目录拷进来——副本随原件走，不另存一份。
 
 <<tangle/Makefile~: plugin>>= @
-	# 编辑器插件的十一个产物（整棵 tangle/editor/ 都是产物）
+	# 编辑器插件的产物（整棵 tangle/editor/ 都是产物，node_modules 除外）
 	plugin: $(NW)
-		$(NW) tangle "book/Chapter 5/plugin.nw" .
+		$(NW) tangle "book/Appendix C/plugin.nw" .
+		@cp LICENSE tangle/editor/LICENSE
+		@cp assets/icon.png tangle/editor/icons/icon.png
+
+~@
+
+商店要的是一份 `.vsix`。打包不是构建的一部分——绝大多数时候改完代码只在本地 reload 窗口，不需要出包；所以它单独一个目标，不挂在 `all` 上。
+
+仓库地址还没定，所以放开 vsce 的 repository 检查；除这一条外，其余警告都当真：缺 README、缺许可证、把生成器打进包，这些都该当场修好，而不是让它们躺在发布日志里。
+
+<<tangle/Makefile~: vsix>>= @
+	# 打包上架：产出一个 .vsix。既能 `code --install-extension` 直接装，也能拿去 publish。
+	vsix: plugin
+		@cd tangle/editor && npx --yes @vscode/vsce package --allow-missing-repository --out ../../tangle/nw-$(EXTVER).vsix
+		@echo "已打包：tangle/nw-$(EXTVER).vsix"
 
 ~@
 
@@ -339,7 +359,7 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 	# 两个工具：源由 tangle 展开（chunk 名里写着路径），再由编译器编成二进制。
 	tools: tangle/build/serve tangle/build/enhance
 
-	# 同一篇的两份产物：改 .nw 重新展开，别手改 .cpp。
+	# 两个工具同属一篇，一次展开出两份 .cpp。
 	tangle/tools/serve.cpp tangle/tools/enhance.cpp: $(NW) book/Appendix\ A/tools.nw
 		$(NW) tangle -o . "book/Appendix A/tools.nw"
 
@@ -508,7 +528,7 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 		@tmp=$$(mktemp -d) || exit 1; \
 		$(NW) tangle -o "$$tmp" $(PROC) >/dev/null || { rm -rf "$$tmp"; exit 1; }; \
 		$(NW) tangle -o "$$tmp" "book/Appendix A/construct.nw" >/dev/null || { rm -rf "$$tmp"; exit 1; }; \
-		$(NW) tangle -o "$$tmp" "book/Chapter 5/plugin.nw" >/dev/null || { rm -rf "$$tmp"; exit 1; }; \
+		$(NW) tangle -o "$$tmp" "book/Appendix C/plugin.nw" >/dev/null || { rm -rf "$$tmp"; exit 1; }; \
 		$(NW) tangle -o "$$tmp" "book/Chapter 5/man.nw" >/dev/null || { rm -rf "$$tmp"; exit 1; }; \
 		$(NW) tangle -o "$$tmp" "book/Appendix A/tools.nw" >/dev/null || { rm -rf "$$tmp"; exit 1; }; \
 		$(NW) tangle -o "$$tmp" "book/Appendix A/control.nw" >/dev/null || { rm -rf "$$tmp"; exit 1; }; \

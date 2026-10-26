@@ -219,6 +219,8 @@ $$
 
 三步串起来就是 `expand`。它自己不含逻辑，只有顺序：把名字压进 `stack`，贴完再弹出来——正好对应"进这一层、出这一层"。
 
+待办块是个例外：它既不落盘，也不参与展开。`if (c.todo) return;` 放在查名字之后——名字仍要解析（拼错照样报错），但体一个字也不贴。占位块的作用是让你先写下结构、把没写完的地方标出来，而不是让半截代码混进产物。
+
 << expand >>= @
 @after: paste_body
 	static void expand(const Document& doc, const string& file, const string& name, const string& indent,
@@ -226,6 +228,8 @@ $$
 		size_t idx = resolve_name(doc, file, name, from_path, at_line);
 		const Chunk& c = doc.chunks[idx];
 		if (!c.defined) throw Error(file, at_line, "只声明没有定义：" + name);
+		// 待办占位展开成空：它还没有内容，把半截代码贴进产物只是把错误往后推。
+		if (c.todo) return;
 		check_cycle(file, idx, stack, at_line);
 		stack.push_back(idx);
 		paste_body(doc, c, file, indent, sink, stack);
@@ -281,7 +285,6 @@ $$
 第 2 步为什么按文档位置挑？因为约束没说的部分不该被算法偷偷决定。两块互不相欠时保持作者写的顺序，是唯一不让人意外的选择。
 
 << order_product >>= @
-@long
 	// 把一组 chunk 排成落盘顺序：先满足 @after 约束，其余保持文档顺序。
 	// 每轮从"前置都排好了"的块里挑文档位置最靠前的一个——这就是拓扑排序。
 	vector<size_t> order_product(const Document& doc, const vector<size_t>& group,
@@ -363,7 +366,6 @@ $$
 这条能力的用处只有一个：**`.nw` 里的编译错误，报的就是 `.nw` 的行号**。`nw run` 把它默认打开（《命令行》）。
 
 << tangle >>= @
-@long
 	// 只有 C/C++ 的产物认 #line 指令；写进 Makefile 或 YAML 里就是语法错。
 	static bool is_c_like(const string& path) {
 		size_t dot = path.rfind('.');
@@ -401,7 +403,9 @@ $$
 			for (size_t i : order_product(doc, g.chunks, g.path, file)) {
 				const Chunk& c = doc.chunks[i];
 				// v2：只有"文档层声明 + 单段名字 + 有定义"的块才落盘。
-				if (!c.defined || c.inside || c.name.find("::") != string::npos) continue;
+				// 标了 @todo 的块不落盘：它是占位，不是实现。
+				// 落盘会生成一个空文件，而下一次编译就会去找它——空文件比没有文件更难查。
+				if (!c.defined || c.inside || c.todo || c.name.find("::") != string::npos) continue;
 				// 块与块之间空一行：散文里的分隔不该只存在于阅读版，
 				// 产物也要能读。片段展开（expand）不插空行，那是"一句话换行"。
 				if (!p.lines.empty() && !p.lines.back().empty()) sink.put(string(), c.src_file, 0);

@@ -144,7 +144,6 @@ cmark 的 AST 只有两类东西：**块**（段落、标题、列表、围栏�
 边界现在有权威答案：`#` 后面必须有空格（否则 `#include <stdio.h>` 会成为标题）、表格要先有分隔行、围栏里的 `#` 不是标题、紧凑列表的段落不包 `<p>`。这些以前是我们要在代码里逐条维护的判据，现在由 CommonMark 的规范回答——适配层只需要知道"cmark 会把它读成哪个节点类型"。
 
 << md-block >>= @
-@long
 	// 行内与着色在下面几节定义；先声明，落盘顺序就不必迁就调用顺序。
 	static void md_inline(cmark_node* parent, std::ostringstream& out);
 	static void md_inline_node(cmark_node* n, std::ostringstream& out);
@@ -153,6 +152,39 @@ cmark 的 AST 只有两类东西：**块**（段落、标题、列表、围栏�
 
 	// cmark 的 literal 对容器节点是 NULL：统一成一个空串，省得每处判空。
 	static string inert(const char* s) { return s ? string(s) : string(); }
+
+	// callout 的类型归一：Obsidian 认的 13 类，别名折到主名上——样式只写 13 份。
+	// 认不出的类型按 note 处理（与 Obsidian 一致）：正文里的一个错字不该挡住整篇。
+	static string callout_kind(const string& raw) {
+		static const char* kAlias[][2] = {
+			{"note", "note"},     {"abstract", "abstract"}, {"summary", "abstract"}, {"tldr", "abstract"},
+			{"info", "info"},     {"todo", "todo"},
+			{"tip", "tip"},       {"hint", "tip"},          {"important", "tip"},
+			{"success", "success"}, {"check", "success"},   {"done", "success"},
+			{"question", "question"}, {"help", "question"}, {"faq", "question"},
+			{"warning", "warning"}, {"warn", "warning"},    {"caution", "warning"}, {"attention", "warning"},
+			{"failure", "failure"}, {"fail", "failure"},    {"missing", "failure"},
+			{"danger", "danger"}, {"error", "danger"},
+			{"bug", "bug"},       {"example", "example"},
+			{"quote", "quote"},   {"cite", "quote"},
+		};
+		for (const auto& a : kAlias)
+			if (raw == a[0]) return a[1];
+		return "note";
+	}
+
+	// 没写标题时用中文类型名：这本书是中文的，没道理让 `[!warning]` 顶着英文 Warning。
+	static string callout_label(const string& kind) {
+		static const char* kLabel[][2] = {
+			{"note", "笔记"},   {"abstract", "摘要"}, {"info", "信息"},    {"todo", "待办"},
+			{"tip", "提示"},    {"success", "完成"},  {"question", "问题"}, {"warning", "警告"},
+			{"failure", "失败"}, {"danger", "危险"},  {"bug", "缺陷"},     {"example", "示例"},
+			{"quote", "引用"},
+		};
+		for (const auto& a : kLabel)
+			if (kind == a[0]) return a[1];
+		return kind;
+	}
 
 	static void md_children(cmark_node* n, std::ostringstream& out) {
 		for (cmark_node* c = cmark_node_first_child(n); c; c = cmark_node_next(c))
@@ -196,7 +228,8 @@ cmark 的 AST 只有两类东西：**块**（段落、标题、列表、围栏�
 		}
 		if (t == "block_quote") {
 			// `> [!类型] 标题` 是一次 callout：首段的第一个 text 以 `[!` 起头。
-			string kind, title;
+			// 类型后面紧跟的 `-` / `+` 是折叠开关（与 Obsidian 同）：`-` 默认收起，`+` 默认展开。
+			string kind, title, fold;
 			cmark_node* p0 = cmark_node_first_child(n);
 			if (p0 && string(cmark_node_get_type_string(p0)) == "paragraph") {
 				cmark_node* t0 = cmark_node_first_child(p0);
@@ -204,8 +237,14 @@ cmark 的 AST 只有两类东西：**块**（段落、标题、列表、围栏�
 				if (lit.size() > 3 && lit.compare(0, 2, "[!") == 0) {
 					size_t rb = lit.find(']');
 					if (rb != string::npos) {
-						kind = lit.substr(2, rb - 2);
-						title = trim(lit.substr(rb + 1));
+						kind = callout_kind(trim(lit.substr(2, rb - 2)));
+						// 折叠符在 `]` 外面：`[!note]- 标题`，不是写在类型名里。
+						string after = trim(lit.substr(rb + 1));
+						if (!after.empty() && (after[0] == '-' || after[0] == '+')) {
+							fold = after.substr(0, 1);
+							after = trim(after.substr(1));
+						}
+						title = after;
 					}
 				}
 			}
@@ -215,8 +254,13 @@ cmark 的 AST 只有两类东西：**块**（段落、标题、列表、围栏�
 				out << "</blockquote>\n";
 				return;
 			}
-			out << "<aside class=\"callout callout-" << html_escape(kind) << "\">\n";
-			if (!title.empty()) out << "<p class=\"callout-title\">" << html_escape(title) << "</p>\n";
+			if (title.empty()) title = callout_label(kind);
+			// 只有写了折叠符才用 <details>：普通的 callout 是一段旁注，不该多一次点击。
+			const bool boxed = !fold.empty();
+			out << (boxed ? "<details" : "<aside") << " class=\"callout callout-" << html_escape(kind)
+			    << "\"" << (fold == "+" ? " open" : "") << ">\n";
+			out << (boxed ? "<summary class=\"callout-title\">" : "<p class=\"callout-title\">")
+			    << html_escape(title) << (boxed ? "</summary>\n" : "</p>\n");
 			// 首段里 `[!类型]` 之后的内容跳过那个 text 节点再渲染。
 			cmark_node* rest = cmark_node_first_child(p0);
 			if (rest) rest = cmark_node_next(rest);
@@ -227,7 +271,7 @@ cmark 的 AST 只有两类东西：**块**（段落、标题、列表、围栏�
 				out << "</p>\n";
 			}
 			md_children(cmark_node_next(p0), out);
-			out << "</aside>\n";
+			out << (boxed ? "</details>\n" : "</aside>\n");
 			return;
 		}
 		if (t == "list") {
@@ -340,6 +384,8 @@ cmark 的 AST 只有两类东西：**块**（段落、标题、列表、围栏�
 
 `[[…]]`、`$…$` 与 callout 不是 CommonMark 的东西。前两种在 cmark 眼里只是普通文字，会原样留在 text 节点里；最后一种 cmark 会读成 blockquote，`[!类型]` 是它第一个 text。
 
+callout 是三者里唯一要读结构的：类型先归一——Obsidian 认的 13 类，`hint`、`caution`、`error` 这些别名折到主名上，样式只写 13 份；认不出的类型按 `note` 处理，不报错，正文里的一个错字不该挡住整篇。类型后面紧跟 `-` 或 `+` 就变成折叠块（`<details>`）：旁注一多，默认收起比一屏彩色框安静。没写标题时用中文类型名——这本书是中文的，没道理让 `[!warning]` 顶着英文 Warning。
+
 所以适配层要给它们留位置，但不是"再写一个 Markdown 解析器"——只在**已经切好的文字**里扫一遍，遇到认得的花样就换成一个包装，其余照旧转义。
 
 `[[目标]][尺寸]` 一鱼两吃：目标是图片（按扩展名认）就出 `<img>`，否则出链接。这正是双链的意思——**写的时候只写"指向谁"，渲染成什么由被指的东西决定**。
@@ -347,7 +393,6 @@ cmark 的 AST 只有两类东西：**块**（段落、标题、列表、围栏�
 链接文字也不手写：`.nw` 的目标交给站点层查表，显示那一篇的标题，查不到才退回文件名。手写 Markdown 链接的问题是两边各记一份——书名改了、文件加了序号，链接文字还停在旧的那一份上，而它不会报错，只会在读者点进去时对不上。尺寸只对图片有意义：`[800]` 是宽，`[800x600]` 是宽高，`[50%]` 是百分比宽度。
 
 << md-custom >>= @
-@long
 	// 双链要显示"被指那一篇的标题"，而标题只有站点层知道：渲染每页之前把
 	// url → 标题填进这张表；查不到就退回文件名，链接总还是能点。
 	static map<string, string> g_titles;
