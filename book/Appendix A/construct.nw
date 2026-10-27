@@ -354,13 +354,16 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 
 依赖单独一步：`node_modules` 是别人的代码，不入库，所以要能一条命令装回来。它不进 `all`——构建本身不需要它（语法生成器是纯 Node，`require` 的只有 `fs`/`path`），只有真要在编辑器里看效果时才需要。
 
+它必须挂在 `plugin` 后面：`npm install` 要进 `tangle/editor/`，而那整棵目录本身就是 `book/Appendix C/plugin.nw` 的产物，新克隆的仓库里没有它。README 和 CI 都把 `make deps` 排在 `make` 之前——顺序是对的，缺的是这条依赖；没有它，新克隆后第一次敲 `make deps` 就死在 `cd tangle/editor` 上。
+
 公式那一步的 katex 也从这里取，但**不装系统包**：它的依赖声明 `nodejs:any`，而 nodesource 装的 node 不提供这个虚包，`apt install katex` 会把 node 一起换掉。所以只把发行版包里的那份 JS 解出来，放进 `tangle/vendor/`——同样的东西，不碰系统的 node。
 
 取不到也不致命：后处理器找不到 katex 就把公式留成源码。
 
 <<tangle/Makefile~: deps>>= @
 	# 编辑器插件的三个 npm 依赖（node_modules 不入库）
-	deps:
+	# 依赖 plugin：tangle/editor/ 本身是产物，新克隆时还不存在。
+	deps: plugin
 		cd tangle/editor && npm install --silent --no-fund --no-audit
 		@mkdir -p tangle/vendor
 		@cd tangle/vendor && \
