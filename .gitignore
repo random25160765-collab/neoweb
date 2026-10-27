@@ -10,6 +10,7 @@ __pycache__/
 
 .DS_Store
 *.swp
+.Trash-0
 
 # 浏览器实测留下的临时快照（playwright-cli 自己往这里写）
 .playwright-cli/

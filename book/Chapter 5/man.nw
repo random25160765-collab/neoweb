@@ -132,7 +132,7 @@ roff 是排版语言，不是 Markdown：`.SH` 起节、`.TP` 起条目、`.B`/`
 	.TP
 	.B \-\-markdown
 	.na
-	weave 换 markdown 后端：散文与代码按原样落回 markdown，不做外壳与增强。单页写 \fI.md\fP 文件；出站时 HTML 站点仍在根目录，markdown 进 \fI<目标>/markdown/\fP——两种格式分门别类，互不覆盖。出站的每页带书结构：头上一行部名与目录链接，尾上一行上下章，另有 \fIindex.md\fP 目录。
+	weave 换 markdown 后端：散文与代码按原样落回 markdown，不做外壳与增强。单页写 \fI.md\fP 文件；出站时 HTML 站点仍在根目录，markdown 进 \fI<目标>/markdown/\fP——目录结构镜像书本身（\fIChapter 1/1-history.md\fP 这样按章落位）。出站的每页带书结构：头上一行部名与目录链接，尾上一行上下章，另有 \fIindex.md\fP 目录，链接全是目录间的相对路径。
 	.TP
 	.BR \-V ", " \-\-version
 	.na

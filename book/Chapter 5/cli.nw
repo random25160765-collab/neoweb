@@ -220,41 +220,69 @@ tangle/main.cpp @
 
 依赖方向没有被破坏：`weave` 本来就在写文件；缺 `dot`、缺 `node` 时增强退回源码形态，构建照样通过。
 
-markdown 版的书结构长在稿子外面，分三样：文件名、头上的面包屑、尾上的上下章。文件名从页的 url 来——url 是整站的公共财产，markdown 这边只把后缀换掉。
+markdown 版的书结构长在稿子外面，但**不学 HTML 的扁平布局**：HTML 站点把页铺平在根目录（url 是给人念的地址），markdown 这边把书的目录原样搬过来——`Chapter 1/1-history.md`、`Chapter 2/2-types.md`。文件是谁的，一眼就看得出来，也方便整章整章地搬走。路径从源路径来：剥掉开头的 `book/`，后缀换成 `.md`，其余一概不动。
 
-<< md-name >>= @
-	// 页的 url → markdown 文件名：把 .html 后缀换回 .md。
-	static string md_name(const Page& p) {
-		string name = p.url;
-		name.replace(name.size() - 5, 5, ".md");
-		return name;
+<< md-path >>= @
+	// 源路径 → markdown 相对路径：剥掉开头的 book/，.nw 换成 .md。
+	// 目录结构镜像书本身——Chapter 1/1-history.nw → Chapter 1/1-history.md。
+	static string md_path(const string& src) {
+		string p = has_prefix(src, "book/") ? src.substr(5) : src;
+		p.replace(p.size() - 3, 3, ".md");
+		return p;
 	}
 
 ~@
 
-头上的面包屑只有一行：部名带回目录的链接，排成一条引用。散文一个字不动——结构不属于正文。
+目录一深，链接就得讲相对路径：从 `Chapter 1/` 里的页面指到 `index.md` 是 `../index.md`，指到隔壁章是 `../Chapter 2/2-types.md`。一个通用的小函数把这件事一次做对：逐段对齐公共前缀，from 这边多出的每段退一级，to 的剩余段顺路下去。
+
+<< md-rel >>= @
+	// 从 from_dir 出发指到 to 的相对链接：逐段对齐，多出的段各退一级 "../"。
+	static string md_rel(const string& from_dir, const string& to) {
+		size_t ka = 0, kb = 0;
+		while (ka <= from_dir.size() && kb < to.size()) {
+			size_t na = from_dir.find('/', ka), nb = to.find('/', kb);
+			if (nb == string::npos) break;   // to 剩下的已是文件名，没有目录段可比
+			size_t la = (na == string::npos ? from_dir.size() : na) - ka;
+			if (from_dir.compare(ka, la, to, kb, nb - kb) != 0) break;
+			ka = (na == string::npos ? from_dir.size() : na + 1);
+			kb = nb + 1;
+		}
+		string out;
+		if (ka < from_dir.size()) {
+			out = "../";   // 最后一段后面没有 '/'，但它也算一级，所以先补一个
+			for (size_t q = ka; q < from_dir.size(); ++q)
+				if (from_dir[q] == '/') out += "../";
+		}
+		return out.empty() ? to.substr(kb) : out + to.substr(kb);
+	}
+
+~@
+
+头上的面包屑只有一行：部名带回目录的链接，排成一条引用。链接用相对路径——页面住在章目录里，指回根目录的 index.md 得先退出去。散文一个字不动——结构不属于正文。
 
 << md-crumbs >>= @
-	// markdown 页的头：一行引用，部名与目录链接。没有部名的页只给目录。
-	static string md_crumbs(const Page& p) {
-		string out = "> [目录](index.md)";
+	// markdown 页的头：一行引用，部名与目录链接，路径相对本页所在目录。
+	static string md_crumbs(const Page& p, const string& from_dir) {
+		string out = "> [目录](" + md_rel(from_dir, "index.md") + ")";
 		if (!p.group.empty()) out += " · " + p.group;
 		return out + "\n\n";
 	}
 
 ~@
 
-尾上的上下章与 HTML 版同一套规矩：两格、头尾各有说法——markdown 里没有空 span，就用一句括号话占位。分隔线先把正文和导航隔开：它不是正文，不该被读成正文。
+尾上的上下章与 HTML 版同一套规矩：两格、头尾各有说法——markdown 里没有空 span，就用一句括号话占位。链接照样走 md_rel：跨章翻页在镜像布局里是跨目录的。分隔线先把正文和导航隔开：它不是正文，不该被读成正文。
 
 << md-pager >>= @
 	// markdown 页的尾：上一篇 · 目录 · 下一篇。头尾用括号话占位。
-	static string md_pager(const vector<Page>& pages, size_t k) {
+	static string md_pager(const vector<Page>& pages, const vector<string>& paths,
+	                       size_t k, const string& from_dir) {
 		std::ostringstream out;
 		out << "\n---\n\n";
-		if (k > 0) out << "[← " << pages[k - 1].title << "](" << md_name(pages[k - 1]) << ")";
+		if (k > 0) out << "[← " << pages[k - 1].title << "](" << md_rel(from_dir, paths[k - 1]) << ")";
 		else out << "（这是第一篇）";
-		out << " · [目录](index.md) · ";
-		if (k + 1 < pages.size()) out << "[" << pages[k + 1].title << " →](" << md_name(pages[k + 1]) << ")";
+		out << " · [目录](" << md_rel(from_dir, "index.md") << ") · ";
+		if (k + 1 < pages.size())
+			out << "[" << pages[k + 1].title << " →](" << md_rel(from_dir, paths[k + 1]) << ")";
 		else out << "（这是最后一篇）";
 		out << "\n";
 		return out.str();
@@ -262,20 +290,20 @@ markdown 版的书结构长在稿子外面，分三样：文件名、头上的�
 
 ~@
 
-markdown 的目录页也用不着 HTML 那套：一份纯 markdown 的清单，分组与整站一致。它只被 markdown 分支调用，就跟 cmd_weave 写在同一节里。
+markdown 的目录页也用不着 HTML 那套：一份纯 markdown 的清单，分组与整站一致。它躺在 markdown/ 的根上，链接直接用相对根的 md 路径——目录页自己不在任何章目录里，不用退级。
 
 << md-index >>= @
-	// markdown 的目录页：分组清单，链接指向同目录里的 .md。
-	static string md_index(const vector<Page>& pages) {
+	// markdown 的目录页：分组清单，链接是相对 markdown/ 根的路径。
+	static string md_index(const vector<Page>& pages, const vector<string>& paths) {
 		std::ostringstream out;
 		out << "# 目录\n\n";
 		string cur;
-		for (const auto& p : pages) {
-			if (p.group != cur) {
-				cur = p.group;
-				if (!cur.empty()) out << "\n## " << p.group << "\n\n";
+		for (size_t k = 0; k < pages.size(); ++k) {
+			if (pages[k].group != cur) {
+				cur = pages[k].group;
+				if (!cur.empty()) out << "\n## " << cur << "\n\n";
 			}
-			out << "- [" << p.title << "](" << md_name(p) << ")\n";
+			out << "- [" << pages[k].title << "](" << paths[k] << ")\n";
 		}
 		return out.str();
 	}
@@ -298,15 +326,21 @@ markdown 的目录页也用不着 HTML 那套：一份纯 markdown 的清单，�
 				return 0;
 			}
 			vector<Page> pages = pages_of(docs, a.inputs, parts);
+			// markdown 路径镜像书目录：先算齐所有页的路径，链接才有得指。
+			vector<string> paths;
+			for (const auto& f : a.inputs) paths.push_back(md_path(f));
 			string dir = a.target + "/markdown";
 			for (size_t k = 0; k < docs.size(); ++k) {
+				// 本页所在目录：镜像布局里它决定面包屑与上下章怎么退级。
+				size_t slash = paths[k].rfind('/');
+				string here = slash == string::npos ? string() : paths[k].substr(0, slash);
 				// 书结构包在稿子外面：头上部名与目录，尾上上下章。
-				write_file(dir + "/" + md_name(pages[k]),
-				           md_crumbs(pages[k]) + render_markdown(docs[k], a.inputs[k])
-				               + md_pager(pages, k));
-				std::cout << "写出 " << dir << "/" << md_name(pages[k]) << "\n";
+				write_file(dir + "/" + paths[k],
+				           md_crumbs(pages[k], here) + render_markdown(docs[k], a.inputs[k])
+				               + md_pager(pages, paths, k, here));
+				std::cout << "写出 " << dir << "/" << paths[k] << "\n";
 			}
-			write_file(dir + "/index.md", md_index(pages));
+			write_file(dir + "/index.md", md_index(pages, paths));
 			std::cout << "写出 " << dir << "/index.md（" << pages.size() << " 篇）\n";
 			return 0;   // markdown 不增强：公式留在 $…$，图留在 ```dot，那就是它的形态
 		}
