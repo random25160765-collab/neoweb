@@ -85,11 +85,13 @@ tangle/weave.cpp @
 	<< highlight >>
 	<< css >>
 	<< anchor >>
+	<< code_lang >>
 	<< product_order >>
 	<< render_chunk >>
 	<< page-meta >>
 	<< page-shell >>
 	<< render_document >>
+	<< render_markdown >>
 	<< page-nav >>
 	<< page-toc >>
 	<< site-index >>

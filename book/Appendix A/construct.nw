@@ -316,12 +316,12 @@ man 页和二进制一样是产物：`tangle/nw.1` 由《手册》展开，装�
 			rc=$$(case "$${SHELL##*/}" in zsh) echo "$$HOME/.zshrc" ;; bash) echo "$$HOME/.bashrc" ;; *) echo "$$HOME/.profile" ;; esac); \
 			line="export PATH=\"$(BINDIR):\$$PATH\""; \
 			if grep -qF "$$line" "$$rc" 2>/dev/null; then \
-				echo "$$rc 里已有这一行，没再写一遍"; \
+				echo "$$rc 里已有这一行"; \
 			else \
 				printf '\n# 由 make install 加入\n%s\n' "$$line" >> "$$rc"; \
 				echo "已把 $(BINDIR) 写进 $$rc"; \
 			fi; \
-			echo "新开一个终端就能直接敲 nw；这个窗口先 source $$rc" ;; \
+			echo "请新开一个终端，或者先 source $$rc" ;; \
 		esac
 		@$(BINDIR)/nw --version
 

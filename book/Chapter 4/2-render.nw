@@ -260,6 +260,21 @@ chunk 名允许中文和空格（`<<tangle/parse.cpp: parse>>`），但 HTML 的
 
 一个 chunk 在 HTML 里是一个 `<figure>`：上面一行标题写"名字 → 产物路径"，下面是代码。用 `figure` 而不是 `div`，因为它本来就该是"带标题的插图"。
 
+语言标签从产物路径来：取文件名的后缀。两个后端都要它——HTML 拿去喂着色器，markdown 拿去填围栏标记——所以单独一块，不藏在哪一副笔墨里。
+
+<< code_lang >>= @
+	// 产物路径 → 语言标签：取文件名后缀。Makefile 没有后缀，单独点名。
+	static string code_lang(const string& path) {
+		string base = path;
+		size_t slash = base.rfind('/');
+		if (slash != string::npos) base = base.substr(slash + 1);
+		if (base == "Makefile") return "makefile";   // 这份产物没有后缀
+		size_t dot = base.rfind('.');
+		return dot == string::npos ? string() : base.substr(dot + 1);
+	}
+
+~@
+
 代码整块交给 `highlight`，不是一行一行送。理由不是省事：Source-highlight 是有状态的，`/* … */` 这种跨行注释靠它记住"现在还在注释里"；拆成一行一次，第二行起就会被当成普通代码，颜色断在中间。
 
 **引用行单独包一层** `<span class="ref">`——读者要能一眼分出"这一行是引用，不是代码"。这是 `ref_line` 的第二次登场：tangle 用它决定展开，weave 用它决定染色，判断标准只有一份。实现上先整块着色、再按行拆回去，引用行用转义后的原文替换掉。
@@ -279,14 +294,8 @@ chunk 名允许中文和空格（`<<tangle/parse.cpp: parse>>`），但 HTML 的
 		else out << "<span class=\"cpath\">纯片段</span>";
 		out << "</figcaption>\n<pre><code>";
 
-		// 语言从产物路径的后缀来；纯片段没有路径，就不着色（也无从推断）。
-		string base = c.path;
-		size_t slash = base.rfind('/');
-		if (slash != string::npos) base = base.substr(slash + 1);
-		string ext;
-		size_t dot = base.rfind('.');
-		if (dot != string::npos) ext = base.substr(dot + 1);
-		if (base == "Makefile") ext = "makefile";   // 这份产物没有后缀
+		// 语言从产物路径的后缀来；纯片段没有路径，返回空串——就不着色（也无从推断）。
+		string ext = code_lang(c.path);
 
 		// 围栏里的行带 `\x02`：剥掉标记；引用行记下来，着色后单独替换。
 		vector<string> lines;
@@ -459,6 +468,54 @@ URL 从文件名来，但去掉开头的序号：`1-syntax.nw` → `syntax.html`
 
 `rfind('.')` 从右往左找最后一个点，`substr(dot + 1)` 取它后面的部分——就是后缀。`string::npos` 是"没找到"的返回值，它不是合法的下标，所以要先判一下。
 
+
+~@
+
+## 九、markdown 后端：一副笔墨，不是另一份排版
+
+HTML 页面是"排版后的成品"：外壳、样式、目录、导航、增强，一样不少。可有些去处不收 HTML——GitHub 的仓库、别的静态站点生成器、只想把稿子贴进聊天窗口的人。这些地方收的是 markdown 本身。
+
+所以 weave 有第二个后端：`render_markdown`。它与 `render_document` 是**同一份文档的两副笔墨**，不是两个功能：走的还是同一份 `nodes`，散文原样透传——它本来就是 markdown 写的，一个字都不必动；chunk 按原位插回，围栏代码块加一行"名字 → 产物路径"的粗体标题，身份信息和 HTML 版的 figcaption 说的是同一件事。
+
+不做的和做的要一样说清楚：没有外壳、没有样式、不做增强。书结构也不在这里长——`render_markdown` 只管一篇，单页就是一篇裸稿；出站点时由命令行那头把部名、目录链接与上下章包在稿子外面（第五章「weave：一次一篇」）。这与 `render_document` 把侧栏和导航交给调用方是同一条规矩：**笔墨只管墨，不管纸裁多大**。
+
+围栏长度要看货：chunk 正文里若本来就有 ``` 行（比如讲 markdown 的那几段），短围栏会被它截断，所以按内容升到 ````。
+
+<< render_markdown >>= @
+	// markdown 后端：散文透传，chunk 插回成围栏代码块。没有外壳与导航，
+	// 也不做 dot/KaTeX 增强——它就是这份文档的源稿形态。
+	string render_markdown(const Document& doc, const string& file) {
+		std::map<size_t, size_t> seq = product_order(doc, file);
+		std::ostringstream out;
+		for (const auto& n : doc.nodes) {
+			if (n.kind != NodeKind::Code) {
+				// 散文与待办都按原样落回：待办那一行 @todo: 前缀也是稿子的一部分。
+				for (const auto& ln : n.lines) out << ln << '\n';
+				continue;
+			}
+			const Chunk& c = doc.chunks[n.chunk_at];
+			auto at = seq.find(n.chunk_at);
+			// 标题行与 HTML 版的 figcaption 是同一件事：这块叫什么、落到哪个产物。
+			out << "**<<" << c.name << ">>**";
+			if (!c.path.empty()) out << " → `" << c.path << "`";
+			if (at != seq.end()) out << "（#" << at->second << "）";
+			out << "\n\n";
+			// 围栏长度看货：正文里已有 ``` 行就升到 ````；五道杠以上的稿子不存在。
+			string fence = "```";
+			for (const auto& raw : c.body) {
+				string ln = (!raw.empty() && raw[0] == '\x02') ? raw.substr(1) : raw;
+				if (ln.compare(0, 4, "````") == 0) { fence = "`````"; break; }
+				if (ln.compare(0, 3, "```") == 0) fence = "````";
+			}
+			out << fence << code_lang(c.path) << '\n';
+			for (const auto& raw : c.body) {
+				string ln = (!raw.empty() && raw[0] == '\x02') ? raw.substr(1) : raw;
+				out << ln << '\n';
+			}
+			out << fence << "\n\n";
+		}
+		return out.str();
+	}
 
 ~@
 

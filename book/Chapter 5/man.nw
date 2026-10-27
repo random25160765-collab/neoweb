@@ -89,7 +89,7 @@ roff 是排版语言，不是 Markdown：`.SH` 起节、`.TP` 起条目、`.B`/`
 	.TP
 	.B weave
 	.na
-	渲染。缺省按书目录出整站；\fB\-o\fP 的目标以 \fI.html\fP 结尾时只渲那一页；\fB\-\-files\fP 按命令行顺序出站。写完就地增强：\fIdot\fP 图变成内联 SVG，公式换成 MathML，缺工具时退回源码形态。
+	渲染。缺省按书目录出整站；\fB\-o\fP 的目标以 \fI.html\fP 结尾时只渲那一页；\fB\-\-files\fP 按命令行顺序出站。写完就地增强：\fIdot\fP 图变成内联 SVG，公式换成 MathML，缺工具时退回源码形态。带 \fB\-\-markdown\fP 时换 markdown 后端：单页写 .md，站点写到 \fI<目标>/markdown/\fP，不增强。
 	.TP
 	.B watch
 	.na
@@ -111,7 +111,7 @@ roff 是排版语言，不是 Markdown：`.SH` 起节、`.TP` 起条目、`.B`/`
 	.TP
 	.B \-o \fI目标\fP
 	.na
-	写往哪里。对 tangle 是一个目录；对 weave 是目录，或一个以 \fI.html\fP 结尾的单页路径。缺省是当前目录。
+	写往哪里。对 tangle 是一个目录；对 weave 是目录，或一个以 \fI.html\fP（--markdown 时 \fI.md\fP）结尾的单页路径。缺省是当前目录。
 	.TP
 	.B \-\-debug
 	.na
@@ -125,6 +125,14 @@ roff 是排版语言，不是 Markdown：`.SH` 起节、`.TP` 起条目、`.B`/`
 	.B \-\-files
 	.na
 	weave 不读书目录，按命令行给的顺序出站。与 \fB\-\-book\fP 互斥：两个都说了顺序，就没有谁优先的道理。
+	.TP
+	.B \-\-html
+	.na
+	weave 用 HTML 后端。这是缺省值；写出来是为了让脚本不必依赖缺省。
+	.TP
+	.B \-\-markdown
+	.na
+	weave 换 markdown 后端：散文与代码按原样落回 markdown，不做外壳与增强。单页写 \fI.md\fP 文件；出站时 HTML 站点仍在根目录，markdown 进 \fI<目标>/markdown/\fP——两种格式分门别类，互不覆盖。出站的每页带书结构：头上一行部名与目录链接，尾上一行上下章，另有 \fIindex.md\fP 目录。
 	.TP
 	.BR \-V ", " \-\-version
 	.na

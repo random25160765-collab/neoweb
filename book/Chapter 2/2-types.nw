@@ -227,6 +227,8 @@ tangle/nw.hpp @
 	// ---- 渲染与站点（weave.cpp）----
 	string render_document(const Document& doc, const string& file, const string& title,
 	                       const string& toc, const string& pager);
+	// markdown 后端：同一份文档的第二副笔墨，散文与代码落回 markdown（第四章末节）。
+	string render_markdown(const Document& doc, const string& file);
 	int write_site(const vector<Document>& docs, const vector<Page>& pages, const string& dir);
 	vector<Page> pages_of(const vector<Document>& docs, const vector<string>& inputs,
 	                      const vector<string>& parts);

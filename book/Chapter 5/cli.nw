@@ -69,7 +69,7 @@ tangle/main.cpp @
 
 用法说明写在程序里，而不是 README 里。理由很实际：装进 `PATH` 之后，人先遇到的是"这条命令怎么用"，而不是仓库里的文档。全部打到 `stderr`——它不是正常输出的一部分，重定向到文件时不该混进去。
 
-参数按 POSIX 惯例收成两种形态：短参数一个字母、带一条横线（`-o`），长参数带两条（`--debug`、`--book`、`--files`）。没有 `-book` 这种单横线的长参数——在 POSIX 里它会被读成一串短参数（`-b -o -o -k`），是"看着能跑、含义却不是那个"的那类错，所以这种写法从一开始就不该存在。
+参数按 POSIX 惯例收成两种形态：短参数一个字母、带一条横线（`-o`），长参数带两条（`--debug`、`--book`、`--files`、`--html`、`--markdown`）。没有 `-book` 这种单横线的长参数——在 POSIX 里它会被读成一串短参数（`-b -o -o -k`），是"看着能跑、含义却不是那个"的那类错，所以这种写法从一开始就不该存在。
 
 一个子命令一行：同一条命令的几种形态是同一件事的三种参数搭配，不该在用法串里占三行。`weave` 的三种形态写在下面的两句里。
 
@@ -82,7 +82,7 @@ tangle/main.cpp @
 		          << "  nw init     [目录]\n"
 		          << "  nw tutorial\n"
 		          << "  nw tangle   [--debug] [-o 目录] 源.nw [更多.nw …]\n"
-		          << "  nw weave    [--book 书目录] [-o 目标] [源.nw …]\n"
+		          << "  nw weave    [--book 书目录] [--html|--markdown] [-o 目标] [源.nw …]\n"
 		          << "  nw watch    [端口] [目录]\n"
 		          << "  nw check    源.nw [更多.nw …]\n"
 		          << "  nw run      [名字]\n"
@@ -114,6 +114,7 @@ tangle/main.cpp @
 		string target;
 		string book;      // --book：书目录路径（缺省用 default_book()）
 		bool files = false;  // --files：明说"就按命令行这几个文件出站点"
+		bool md = false;     // --markdown：换 markdown 后端；--html 显式选回缺省
 		bool debug = false;  // --debug：C/C++ 产物里插 #line，编译错误指回 .nw
 		vector<string> inputs;
 	};
@@ -131,6 +132,10 @@ tangle/main.cpp @
 				a.book = argv[++i];
 			} else if (v == "--files") {
 				a.files = true;
+			} else if (v == "--html") {
+				a.md = false;   // 缺省就是它；写出来是为了让脚本不必依赖缺省值
+			} else if (v == "--markdown") {
+				a.md = true;
 			} else if (v == "--debug") {
 				// 只对 C/C++ 产物生效：编译错误指回 .nw 的那一行。
 				a.debug = true;
@@ -215,10 +220,96 @@ tangle/main.cpp @
 
 依赖方向没有被破坏：`weave` 本来就在写文件；缺 `dot`、缺 `node` 时增强退回源码形态，构建照样通过。
 
+markdown 版的书结构长在稿子外面，分三样：文件名、头上的面包屑、尾上的上下章。文件名从页的 url 来——url 是整站的公共财产，markdown 这边只把后缀换掉。
+
+<< md-name >>= @
+	// 页的 url → markdown 文件名：把 .html 后缀换回 .md。
+	static string md_name(const Page& p) {
+		string name = p.url;
+		name.replace(name.size() - 5, 5, ".md");
+		return name;
+	}
+
+~@
+
+头上的面包屑只有一行：部名带回目录的链接，排成一条引用。散文一个字不动——结构不属于正文。
+
+<< md-crumbs >>= @
+	// markdown 页的头：一行引用，部名与目录链接。没有部名的页只给目录。
+	static string md_crumbs(const Page& p) {
+		string out = "> [目录](index.md)";
+		if (!p.group.empty()) out += " · " + p.group;
+		return out + "\n\n";
+	}
+
+~@
+
+尾上的上下章与 HTML 版同一套规矩：两格、头尾各有说法——markdown 里没有空 span，就用一句括号话占位。分隔线先把正文和导航隔开：它不是正文，不该被读成正文。
+
+<< md-pager >>= @
+	// markdown 页的尾：上一篇 · 目录 · 下一篇。头尾用括号话占位。
+	static string md_pager(const vector<Page>& pages, size_t k) {
+		std::ostringstream out;
+		out << "\n---\n\n";
+		if (k > 0) out << "[← " << pages[k - 1].title << "](" << md_name(pages[k - 1]) << ")";
+		else out << "（这是第一篇）";
+		out << " · [目录](index.md) · ";
+		if (k + 1 < pages.size()) out << "[" << pages[k + 1].title << " →](" << md_name(pages[k + 1]) << ")";
+		else out << "（这是最后一篇）";
+		out << "\n";
+		return out.str();
+	}
+
+~@
+
+markdown 的目录页也用不着 HTML 那套：一份纯 markdown 的清单，分组与整站一致。它只被 markdown 分支调用，就跟 cmd_weave 写在同一节里。
+
+<< md-index >>= @
+	// markdown 的目录页：分组清单，链接指向同目录里的 .md。
+	static string md_index(const vector<Page>& pages) {
+		std::ostringstream out;
+		out << "# 目录\n\n";
+		string cur;
+		for (const auto& p : pages) {
+			if (p.group != cur) {
+				cur = p.group;
+				if (!cur.empty()) out << "\n## " << p.group << "\n\n";
+			}
+			out << "- [" << p.title << "](" << md_name(p) << ")\n";
+		}
+		return out.str();
+	}
+
+~@
+
 << cmd-weave >>= @
-	// weave：给 .html 目标是单页，给目录是整个站点。
+	// weave：给 .html（--markdown 时 .md）目标是单页，给目录是整个站点。
 	static int cmd_weave(const vector<Document>& docs, const Args& a, const vector<string>& parts) {
-		if (a.target.empty()) throw Error(a.inputs.front(), 0, "weave 需要 -o 目标（.html 或目录）");
+		if (a.target.empty()) throw Error(a.inputs.front(), 0, "weave 需要 -o 目标（.html/.md 或目录）");
+		if (a.md) {
+			// markdown 后端：单页给 .md 文件；站点进 <目标>/markdown/——
+			// HTML 站点仍在根目录，两种格式分门别类，互不覆盖。
+			bool one_page = docs.size() == 1 && a.target.size() > 3 &&
+			                a.target.compare(a.target.size() - 3, 3, ".md") == 0;
+			if (one_page) {
+				// 单页不在书里，没有书结构可挂：裸稿。
+				write_file(a.target, render_markdown(docs.front(), a.inputs.front()));
+				std::cout << "写出 " << a.target << "\n";
+				return 0;
+			}
+			vector<Page> pages = pages_of(docs, a.inputs, parts);
+			string dir = a.target + "/markdown";
+			for (size_t k = 0; k < docs.size(); ++k) {
+				// 书结构包在稿子外面：头上部名与目录，尾上上下章。
+				write_file(dir + "/" + md_name(pages[k]),
+				           md_crumbs(pages[k]) + render_markdown(docs[k], a.inputs[k])
+				               + md_pager(pages, k));
+				std::cout << "写出 " << dir << "/" << md_name(pages[k]) << "\n";
+			}
+			write_file(dir + "/index.md", md_index(pages));
+			std::cout << "写出 " << dir << "/index.md（" << pages.size() << " 篇）\n";
+			return 0;   // markdown 不增强：公式留在 $…$，图留在 ```dot，那就是它的形态
+		}
 		bool one_page = docs.size() == 1 && a.target.size() > 5 &&
 		                a.target.compare(a.target.size() - 5, 5, ".html") == 0;
 		if (one_page) {
@@ -520,12 +611,15 @@ tangle/main.cpp @
 		if (a.cmd == "watch") return cmd_watch(a);
 
 		// weave 有三种情形：单页、按书目录出站点（缺省）、显式 --files 按命令行出站点。
+		// 单页的判定跟着后端走：HTML 认 .html，markdown 认 .md。
 		vector<string> parts;
 		if (a.cmd == "weave") {
-			bool single = a.inputs.size() == 1 && a.target.size() > 5 &&
-			              a.target.compare(a.target.size() - 5, 5, ".html") == 0;
-			if (single) {
-				// 单页：目标写的是 .html，就渲染这一篇，不碰书目录。
+			bool html_page = a.inputs.size() == 1 && a.target.size() > 5 &&
+			                 a.target.compare(a.target.size() - 5, 5, ".html") == 0;
+			bool md_page = a.md && a.inputs.size() == 1 && a.target.size() > 3 &&
+			               a.target.compare(a.target.size() - 3, 3, ".md") == 0;
+			if (html_page || md_page) {
+				// 单页：目标写的是 .html（--markdown 时是 .md），就渲染这一篇，不碰书目录。
 			} else if (a.files && !a.book.empty()) {
 				throw Error(a.book, 0, "--book 与 --files 只能选一个");
 			} else if (a.files) {
