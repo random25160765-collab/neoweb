@@ -1,0 +1,101 @@
+name: release
+
+# 打 vX.Y.Z tag 即发布：产出两个平台的二进制包与编辑器插件，自动挂到 GitHub Release。
+# 发布件不再手工搬运——CI 就是发布流程。
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux-x86_64 }
+          - { os: macos-14, platform: macos-arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 编译依赖（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config python3 \
+            libcmark-gfm-dev libcmark-gfm-extensions-dev libsource-highlight-dev
+
+      # Homebrew 的 cmark-gfm 把核心库和扩展库装在一起，没有 Debian 那种拆分
+      - name: 编译依赖（macOS）
+        if: runner.os == 'macOS'
+        run: brew install pkg-config cmark-gfm source-highlight
+
+      - name: 构建
+        run: make nw tangle/nw.1
+
+      - name: 打包
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          dir="nw-$ver-${{ matrix.platform }}"
+          pkg="nw-$ver-${{ matrix.platform }}.tar.gz"
+          mkdir "$dir"
+          install -m 755 tangle/build/nw "$dir/nw"
+          install -m 644 tangle/nw.1 "$dir/nw.1"
+          cp LICENSE "$dir/LICENSE"
+          tar czf "$pkg" "$dir"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$pkg" > "$pkg.sha256"
+          else
+            shasum -a 256 "$pkg" > "$pkg.sha256"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nw-${{ matrix.platform }}
+          path: nw-*.tar.gz*
+
+  vsix-and-release:
+    needs: binary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config python3 \
+            libcmark-gfm-dev libcmark-gfm-extensions-dev libsource-highlight-dev
+
+      - name: npm 依赖与 KaTeX
+        run: make deps
+
+      # 发布前完整走一遍构建链：发布件必须来自一个"整条链都是绿的"的提交
+      - name: 构建全链
+        run: make
+
+      - name: 产物对账
+        run: make verify
+
+      - name: 打包插件
+        run: make vsix
+
+      - name: 收集产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+            tangle/nw-*.vsix
