@@ -129,7 +129,7 @@ parts:
 验收仍是编译（豁免照旧）：
 
 ```
-g++ -std=c++17 -Wall -Wextra -Wno-unused-function -I/tmp/w5/tangle -c /tmp/w5/tangle/weave.cpp
+g++ -std=c++17 -Wall -Wextra -Wno-unused-function -I/tmp/w5 -c /tmp/w5/weave.cpp
 ```
 
 `read_book` 现在就能单独真跑，喂它一份本文开头的那个 YAML：三行一个部、两行一篇，读出来的 `order` 应当与缩进里看到的顺序一致。目录是数据的入口，这一处错了，后面每一页的"下一篇"都会错。

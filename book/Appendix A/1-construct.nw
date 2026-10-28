@@ -12,27 +12,39 @@ file Makefile @
 	<< 构建 >>
 ~@
 
-它落在仓库根目录，因为骨架篇在 `top` 里挂了一行 `file Makefile;`——而 `top` 就是 `-o` 指的那个目录。定义在附录、挂载在骨架：这一处也照 v3 的规矩办，位置由挂载决定，内容由定义决定。
+它落在 `tangle/` 里，因为骨架篇在 `top` 里挂了一行 `file Makefile;`——而 `top` 就是 `-o` 指的那个目录，本仓库给的是 `tangle/`。定义在附录、挂载在骨架：这一处也照 v3 的规矩办，位置由挂载决定，内容由定义决定。
 
-## 二、根 Makefile 也是产物
+## 二、根 Makefile 是唯一的手写层
 
-这是整个仓库里唯一有争议的一个决定：**连构建规则都由书展开**。
+上一版把根 `Makefile` 也做成了产物。理由是"一份真相"：手写一份、书里再贴一份，两份迟早各走各的。理由成立，但它有一个隐藏的代价——**既然产物里要有根 `Makefile`，`top` 就只能是仓库根**。于是 `tangle/`、`examples/`、`editor/`、`nw` 全散在仓库根上，"哪些是写的、哪些是铺的"得靠 `.gitignore` 才看得出来。
 
-不做成产物的理由是自举悖论：`make` 要先有 `Makefile` 才能跑。做成产物的理由是**一份真相**：手写一份、书里再贴一份，两份迟早各走各的——而构建脚本的分歧不会报错，它只会让某台机器上的产物和别人不一样。
-
-我们选后者，代价是承认破点不在 `Makefile` 里：
+这一版把产物收回 `tangle/`，代价就翻过来了：`top` 是 `tangle/`，根 `Makefile` 不可能由它铺出来，只能手写。这二十来行是全书唯一手写的构建代码：
 
 ```
-# 第一次：还没有 Makefile，用破点展开一次
-find book -name '*.nw' -exec python3 nw3.py tangle -o . {} +
+PYTHON ?= python3
 
-# 此后
-make
+.DEFAULT_GOAL := all
+
+FORCE:
+.PHONY: FORCE
+Makefile: ;
+
+SRC := $(shell find book -name '*.nw' | sort | sed 's/ /\\ /g')
+
+%: FORCE
+	@test -f tangle/Makefile || $(PYTHON) nw3.py tangle -o tangle $(SRC)
+	@$(MAKE) --no-print-directory -f tangle/Makefile $@
 ```
 
-一条命令，代价就付清了。往后每次改构建规则，改的是这一篇，`make` 会自己重铺 `Makefile`。
+它只做三件事：**找源**（转义空格）、**第一次**（没有 `tangle/Makefile` 就让破点铺一次）、**转发**（把目标交给真正的规则）。真正的规则是 `tangle/Makefile`，仍然由书展开——所以"一份真相"没有丢，丢的只是"连入口都生成"这个不必要的野心。
 
-这里不能写成 `$(find book -name '*.nw')`：命令替换的结果会被 shell 按空格切开，而本书的路径里就有空格（`book/Chapter 1/…`），切开之后破点收到的是半条路径。`-exec … {} +` 让 `find` 自己把文件交出去，不经过 shell 的分词；`-print0 | xargs -0` 也行，但多一节管道，还多一个"这台机器有没有 `xargs`"的假设。
+三处写法各有原因，都不是风格：
+
+- **`%: FORCE`**：一条模式规则接下所有目标。`FORCE` 是空目标，永远"更新过"，否则 target 与同名目录（`tangle/`）撞上时 make 会说"已是最新"。
+- **不能给这些目标加 `.PHONY`**：make 不为 phony 目标搜索隐含规则，加了之后 `%` 直接失效，所有目标都变成 "Nothing to be done"。
+- **`Makefile: ;`**：空规则，阻止 `%` 去"重造 Makefile 自己"。
+
+第一次 `make` 会铺两遍：转发层铺一次（因为 `tangle/Makefile` 还不存在），`tangle/Makefile` 里的 stamp 规则再铺一次（因为 `.tangle-stamp` 还不存在）。几十毫秒的事，为此在两层之间传递"已经铺过"的状态不值得——状态一旦存在，就得有人保证它和事实一致。
 
 **产物里没有一行注释提醒"这是生成的"。** 那种注释会跟着产物跑到别人的机器上（装好的二进制、发出去的包），而它想说的两件事——"真相在别处"、"别手改"——都是这本书要读者从结构里读出来的，不是靠一句标语。
 
@@ -44,11 +56,14 @@ make
 
 这条边界必须守住，否则会滑成"两个实现各发展一半"：破点每多一个功能，`crosscheck` 能发现的偏差就少一处。
 
-## 四、自举：同一条依赖，两种满足方式
+## 四、自举：两级判断，各答一个问题
 
-`tangle/*.cpp` 是 `.nw` 的产物，但生成它们需要一个能读 `.nw` 的程序。第一次没有这个程序，只能由破点顶上；之后所有 `.nw` 都交给 `nw` 自己。
+自举看起来是一件事，其实是两个不同的问题，分在两层答：
 
-规则里那句 `if [ -x $(NW) ]` 就是这个判断：**有 `nw` 就用它，没有才退回破点**。它不写在两个目标里，因为那是同一件事的两种走法，写两遍就必然有一遍会腐坏。
+- **根转发层问"有没有规则"**：`test -f tangle/Makefile ||`。没有规则，就让破点铺一遍；有规则，就直接转发。它不关心工具存不存在。
+- **规则层问"有没有工具"**：`if [ -x $(NW) ]`。有 `tangle/build/nw` 就用它重铺，没有才退回破点。它不关心自己是怎么被调起来的。
+
+混在一层也能跑，代价是根 Makefile 会变成第二份构建规则——而它明明是手写的，改一次语法就要记得改两处。分开之后，根文件永远只有那三件事。
 
 一个 `.tangle-stamp` 当作"产物已铺"的记号，而不是给八个产物各写一条依赖：`tangle` 一次铺整棵树，逐个追踪只会让 Makefile 变成第二份目录表。
 
@@ -59,6 +74,8 @@ make crosscheck
 ```
 
 它做的是：用破点重新铺一遍到临时目录，与工作区的 `tangle/` 逐字节比对。
+
+比对时要排除两样东西：`build/`（编译产物，破点不会编译）与 `syntaxes/`（`gen-grammar.js` 的产物，破点不会跑 Node）。它们不是 tangle 的输出，而是 tangle 输出的下游——**下游不该参与上游的对账**，否则每次比对都会因为"二进制不一样"而红，而那个红没有任何信息量。
 
 这防的不是"自举失败"——自举失败会当场报错。它防的是**破点悄悄僵化**：语法的某一处改了，`nw` 改了，`nw3.py` 忘了。那时 `make` 依然能过（因为用的是 `nw`），只有下一次从零开始的人会撞上。这种事在自举系统里几乎必然发生一次，所以它得有一条命令守着。
 
@@ -80,7 +97,8 @@ make crosscheck
 	LIBS     := $(shell pkg-config --libs libcmark-gfm source-highlight 2>/dev/null)
 	# 篇的路径带空格，make 按空白切词：把空格转义，make 与 sh 两边都认这个写法。
 	SRC      := $(shell find book -name '*.nw' | sort | sed 's/ /\\ /g')
-	NW       := ./nw
+	# 二进制是 tangle 产物的下游，跟着产物一起放在 tangle/ 下。
+	NW       := tangle/build/nw
 	BOOT     := python3 nw3.py
 
 	.PHONY: all check test web serve crosscheck clean
@@ -89,11 +107,11 @@ make crosscheck
 
 	# 有 nw 就用 nw（自举），没有才退回破点。一次铺整棵树，用一个记号记下。
 	.tangle-stamp: $(SRC) nw3.py
-		@mkdir -p tangle
+		@mkdir -p tangle/build
 		@if [ -x $(NW) ]; then \
-		  echo "  NW    tangle"; $(NW) tangle -o . $(SRC); \
+		  echo "  NW    tangle"; $(NW) tangle -o tangle $(SRC); \
 		else \
-		  echo "  BOOT  nw3.py"; $(BOOT) tangle -o . $(SRC); \
+		  echo "  BOOT  nw3.py"; $(BOOT) tangle -o tangle $(SRC); \
 		fi
 		@touch $@
 
@@ -114,16 +132,19 @@ make crosscheck
 		@$(NW) serve weave
 
 	# 破点与自举的产物逐字节相同：否则"哪一份才是对的"就没人答得上来。
+	# 排除的是下游：编译出的 build/ 与 Node 生成的 syntaxes/，破点都不产出。
 	crosscheck: $(NW)
 		@rm -rf /tmp/nw-boot
 		@$(BOOT) tangle -o /tmp/nw-boot $(SRC) > /dev/null
-		@diff -r tangle /tmp/nw-boot/tangle && echo "crosscheck ok：破点与自举的产物一致"
+		@diff -r -x build -x syntaxes tangle /tmp/nw-boot && echo "crosscheck ok：破点与自举的产物一致"
 
 	clean:
-		rm -rf tangle weave $(NW) .tangle-stamp /tmp/nw-boot
+		rm -rf tangle weave .tangle-stamp /tmp/nw-boot
 ~@
 
 `sed 's/ /\\ /g'` 里那两个反斜杠是两个语言两层的事：`sed` 要一个反斜杠，写成 `\\`；而这段文字在 `$(shell …)` 里，交给 sh 之前不经 `make` 的转义。写错一层的表现是路径里多出一个反斜杠，`find` 找不到文件——报错会指向一行看起来完全正确的路径。
+
+**二进制为什么在 `tangle/build/`**：它由 `tangle/*.cpp` 编译而来，是 tangle 产物的下游。放在 `tangle/` 顶层会和源码混在一起，`ls` 又要靠后缀去分辨；放进 `build/` 之后，"源码在 `tangle/`、编译物在 `tangle/build/`、站点在 `weave/`"三句话就说完了。`build/` 不在骨架里——它不是 tangle 铺出来的，是编译器写的。
 
 **这里没有 `install`**：装到 `PATH` 是每个用的人自己的事，一条 `ln -s` 就够了，把它写进 Makefile 只多一处需要维护的默认值。也没有 `distclean`：`clean` 之后一条命令就能重建全部，再分一档只是把同一个动作起两个名字。
 
@@ -131,10 +152,18 @@ make crosscheck
 
 ```
 git clone <repo> && cd neoweb
-find book -name '*.nw' -exec python3 nw3.py tangle -o . {} +   # 破点：铺出 Makefile 与源码
-make                                                   # 编译出 ./nw
-make web                                               # 铺出 weave/ 那本书
-make crosscheck                                        # 两个实现是否还一致
+make            # 转发层铺出 tangle/，再编译出 tangle/build/nw
+make web        # 铺出 weave/ 那本书
+make serve      # 本地预览
+make crosscheck # 两个实现是否还一致
 ```
 
-第二条之后，破点就退休了。它只在两种时刻出现：**第一次**，和**换了台机器**。
+第一条 `make` 之后，破点就退休了。它只在两种时刻出现：**第一次**，和**换了台机器**。
+
+想单独跑一次破点也可以，但要记得把布局指对：
+
+```
+find book -name '*.nw' -exec python3 nw3.py tangle -o tangle {} +
+```
+
+不能写成 `$(find book -name '*.nw')`：命令替换的结果会被 shell 按空格切开，而本书的路径里就有空格（`book/Chapter 1/…`），切开之后破点收到的是半条路径。`-exec … {} +` 让 `find` 自己把文件交出去，不经过 shell 的分词；`-print0 | xargs -0` 也行，但多一节管道，还多一个"这台机器有没有 `xargs`"的假设。

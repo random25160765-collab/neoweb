@@ -363,7 +363,7 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 
 ```
 python3 nw3.py tangle -o /tmp/w5 book/skeleton.nw "book/Chapter 3"/*.nw book/Chapter\ 4/1-cli.nw book/Chapter\ 5/*.nw
-g++ -std=c++17 -Wall -Wextra -Wno-unused-function -I/tmp/w5/tangle -c /tmp/w5/tangle/weave.cpp
+g++ -std=c++17 -Wall -Wextra -Wno-unused-function -I/tmp/w5 -c /tmp/w5/weave.cpp
 ```
 
 但着色现在就能真跑：把一段本文里的代码喂给 `highlight`，看它吐出来的是不是只有 `<span class="…">`，没有那些外壳。下一篇是目录——一页之所以能叫"书里的一页"，是因为它知道自己在书里的位置。

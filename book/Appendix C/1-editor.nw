@@ -329,7 +329,7 @@ file<json> nw @
 ### 5.3 写出
 
 << 生成器 >>= @
-	// 生成 syntaxes/nw.tmLanguage.json。用法：node editor/tools/gen-grammar.js
+	// 生成 syntaxes/nw.tmLanguage.json。用法（在仓库根）：node tangle/editor/tools/gen-grammar.js
 	const fs = require("fs");
 	const path = require("path");
 
@@ -430,12 +430,14 @@ file<svg> nw-dark @
 ## 八、生成与安装
 
 ```
-nw tangle -o . book/skeleton.nw "book/Appendix C"/*.nw   # 铺出 editor/
-node editor/tools/gen-grammar.js                          # 写出 syntaxes/nw.tmLanguage.json
-ln -s "$PWD/editor" ~/.vscode/extensions/neoweb.nw        # 装成扩展目录
+make                                                      # 铺全书；插件落在 tangle/editor/
+node tangle/editor/tools/gen-grammar.js                   # 写出 syntaxes/nw.tmLanguage.json
+ln -s "$PWD/tangle/editor" ~/.vscode/extensions/neoweb.nw  # 装成扩展目录
 ```
 
-第二条命令不能少：`tmLanguage` 是脚本的产物，不是 tangle 的产物——它得算一遍正则再写出来。这也是它没有挂进骨架的原因：**骨架声明的是"哪些文件存在"，而这一份的内容来自另一条命令。**
+第一条只写 `make`，不写"只 tangle 骨架 + 这一篇"：tangle 会把**每一个挂载的文件**都写一遍，没定义的写成空文件——单铺这一篇会把 `tangle/Makefile` 一并清空。`make` 知道要铺全部篇，它是唯一安全的入口。
+
+第二条不能少：`tmLanguage` 是脚本的产物，不是 tangle 的产物——它得算一遍正则再写出来。这也是它没有挂进骨架的原因：**骨架声明的是"哪些文件存在"，而这一份的内容来自另一条命令。**
 
 第三条是把目录软链进扩展位置（VS Code 与它的下游都认这一层）。改完 `.nw` 重铺、重启窗口，颜色就跟着变。
 

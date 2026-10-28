@@ -34,9 +34,6 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install pkg-config cmark-gfm source-highlight
 
-      - name: 破点展开
-        run: find book -name '*.nw' -exec python3 nw3.py tangle -o . {} +
-
       - name: 构建
         run: make
 
@@ -46,7 +43,7 @@ jobs:
           dir="nw-$ver-${{ matrix.platform }}"
           pkg="$dir.tar.gz"
           mkdir "$dir"
-          install -m 755 nw "$dir/nw"
+          install -m 755 tangle/build/nw "$dir/nw"
           install -m 644 LICENSE "$dir/LICENSE"
           install -m 644 README.md "$dir/README.md"
           tar czf "$pkg" "$dir"
@@ -78,9 +75,6 @@ jobs:
             libcmark-gfm-dev libcmark-gfm-extensions-dev libsource-highlight-dev
 
       # 发布前完整走一遍构建链：发布件必须来自一个"整条链都是绿的"的提交
-      - name: 破点展开
-        run: find book -name '*.nw' -exec python3 nw3.py tangle -o . {} +
-
       - name: 构建
         run: make
 
@@ -93,9 +87,9 @@ jobs:
       # 所以发布件是 editor/ 的压缩包，而不是 vsix——vsix 需要 marketplace 的账号体系。
       - name: 插件
         run: |
-          node editor/tools/gen-grammar.js
+          node tangle/editor/tools/gen-grammar.js
           ver="${GITHUB_REF_NAME#v}"
-          tar czf "nw-$ver-editor.tar.gz" editor
+          tar czf "nw-$ver-editor.tar.gz" -C tangle editor
 
       - name: 收集产物
         uses: actions/download-artifact@v4

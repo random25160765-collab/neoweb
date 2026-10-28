@@ -324,7 +324,7 @@ cmark 给出的是一棵节点树。我们不做自己的 AST，直接把树走�
 ```
 python3 nw3.py check book/skeleton.nw book/Chapter\ 5/1-markdown.nw
 python3 nw3.py tangle -o /tmp/w5 book/skeleton.nw book/Chapter\ 5/1-markdown.nw
-g++ -std=c++17 -Wall -Wextra -Wno-unused-function -I/tmp/w5/tangle -c /tmp/w5/tangle/weave.cpp
+g++ -std=c++17 -Wall -Wextra -Wno-unused-function -I/tmp/w5 -c /tmp/w5/weave.cpp
 ```
 
 `-Wno-unused-function` 是**正在施工**的临时豁免：`md_html` 还没有调用方，等下一篇把块与页接上，这条就不再需要。最终产物里不许留这种豁免——构建严格，豁免只配出现在"这一篇还没接完"的中间态里。

@@ -172,7 +172,7 @@
 
 ```
 python3 nw3.py tangle -o /tmp/w5 book/skeleton.nw "book/Chapter 3"/*.nw book/Chapter\ 4/1-cli.nw book/Chapter\ 5/*.nw
-g++ -std=c++17 -Wall -Wextra -I/tmp/w5/tangle -c /tmp/w5/tangle/weave.cpp
+g++ -std=c++17 -Wall -Wextra -I/tmp/w5 -c /tmp/w5/weave.cpp
 ```
 
 再往下是命令行那一篇的事：给它一个 `weave` 子命令、把 `tangle/book.yaml` 读进来、把页写到 `-o` 指的地方。等那条命令通了，这本书就能自己排自己——**同一份源，一条给编译器，一条给读者**。

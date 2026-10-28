@@ -45,7 +45,7 @@ nw tangle -o /tmp/ex book/skeleton.nw "book/Appendix B/hello.nw"
 cc -o /tmp/ex/hello /tmp/ex/examples/hello.c && /tmp/ex/hello
 ```
 
-两件事都值得看一眼：`tangle` 要带上骨架篇（位置在那里声明），而产物落在 `examples/` 下（挂载说的），不落在 `tangle/`。
+两件事都值得看一眼：`tangle` 要带上骨架篇（位置在那里声明），而产物落在 `examples/` 下（挂载说的），不在输出根上。
 
 一块代码也能是一个完整程序。语法的最小面比它能做的事小得多——这是它敢叫"语法"而不是"框架"的原因。
 

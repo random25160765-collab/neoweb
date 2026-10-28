@@ -16,11 +16,7 @@ jobs:
           sudo apt-get install -y build-essential pkg-config python3 \
             libcmark-gfm-dev libcmark-gfm-extensions-dev libsource-highlight-dev
 
-      # 破点只在第一次出现：它铺出 Makefile 与 tangle/，之后交给 nw 自己。
-      # 用 -exec … {} + 交文件：篇的路径里有空格，command substitution 会把它切开。
-      - name: 破点展开
-        run: find book -name '*.nw' -exec python3 nw3.py tangle -o . {} +
-
+      # 一条 make：根 Makefile 是手写元层，先 bootstrap 出 tangle/Makefile，再转发。
       - name: 构建
         run: make
 
@@ -36,8 +32,8 @@ jobs:
 
       - name: 编辑器语法
         run: |
-          node editor/tools/gen-grammar.js
-          node -e "JSON.parse(require('fs').readFileSync('editor/syntaxes/nw.tmLanguage.json','utf8'))"
+          node tangle/editor/tools/gen-grammar.js
+          node -e "JSON.parse(require('fs').readFileSync('tangle/editor/syntaxes/nw.tmLanguage.json','utf8'))"
 
       - name: 整站
         run: make web

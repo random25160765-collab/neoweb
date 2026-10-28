@@ -37,10 +37,6 @@ v3 的源只需要三样：一棵树、一张接线表、若干块。
 这个项目的第一个产物：一个能跑的程序。
 
 dir top @
-	dir tangle;
-~@
-
-dir tangle @
 	file<c> hello;
 ~@
 
@@ -63,7 +59,7 @@ file<c> hello @
 
 三处值得说：
 
-**定义与挂载分开。** `dir tangle @` 说"这个目录里有什么"，`dir tangle;` 才把它挂到 `top` 下。新项目最容易漏的是第二条——漏了不会报错，只是什么都不产出。
+**定义与挂载分开。** `file<c> hello @` 说的是"这个文件由哪些块组成"，`file<c> hello;` 才把它挂到 `top` 下。新项目最容易漏的是第二条——漏了不会报错，`check` 只给一条"已定义但未挂载"的警告，产物里什么都没有。
 
 **块名短，因为它们住在一个文件里。** 第二个文件开始撞名时，才需要 `!! 名字::` 开一层命名空间；一开始就分层，是把未来的问题提前付账。
 
@@ -80,7 +76,7 @@ SRC := $(shell find book -name '*.nw' | sort | sed 's/ /\\ /g')
 all: run
 
 tangle/hello.c: $(SRC)
-	@$(NW) tangle -o . $(SRC)
+	@$(NW) tangle -o tangle $(SRC)
 
 run: tangle/hello.c
 	@cc -std=c99 -Wall -Wextra -o tangle/hello tangle/hello.c
@@ -119,6 +115,6 @@ clean:
 
 ## 六、这一页验过
 
-这三份东西不是想出来的：把它们抄进一个空目录、`make NW=…/nw`，产物落在 `tangle/hello.c`，跑出来是 `hello, neoweb`。
+这三份东西不是想出来的：把它们抄进一个空目录、`make NW=…/tangle/build/nw`，产物落在 `tangle/hello.c`，跑出来是 `hello, neoweb`。
 
 **一个新项目的第一次成功，应该是三十行以内的事。** 超过三十行，说明工具把"起步"的成本摆错了地方——那是工具的错，不是新项目的错。
