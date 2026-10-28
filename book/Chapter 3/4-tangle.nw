@@ -1,0 +1,241 @@
+# 综合
+
+这一篇产 `tangle/tangle.cpp`：把「一张表 + 一棵树」铺成磁盘上的文件。
+
+综合只有三步：**查**（这个名字指哪一块）、**贴**（把那一块展开成行）、**铺**（按树写盘）。没有单独的"检查"阶段——错了当场报，报的时候带上写错的那一行。
+
+## 一、接线
+
+file<cpp> tangle @
+	<< tangle 的头 >>
+	<< 解析名字 >>
+	<< 展开 >>
+	<< 一个文件 >>
+	<< 铺盘 >>
+	<< tangle 的尾 >>
+~@
+
+顺序仍是编译顺序：先有名字解析，才有展开；先能展开成一个文件，才谈得上铺一棵树。
+
+## 二、头
+
+`resolve`、`file_text`、`tangle` 三个是公开的（`nw.hpp` 里有声明），其余都在匿名命名空间里。
+
+<< tangle 的头 >>= @
+	#include "nw.hpp"
+
+	namespace nw {
+~@
+
+## 三、查：名字只有一种读法
+
+v2 的名字解析是"逐级向上"：从这一块所在的命名空间开始，一路找到根。好处是内层可以直接用外层的名字；代价是「这个 `<<render>>` 指的是哪一个」取决于它写在哪——读的人要回溯，改结构的人要重算。
+
+v3 取消回退：**含 `::` 的是全名，直接查；不含的拼上"写这一行时所在的命名空间"。** 名字只有一种读法，找不到就是找不到。
+
+代价是跨命名空间引用要写全名。这个代价比看上去小：需要写全名的场合，本来也就是"这一块不属于我的命名空间"，写出来反而更清楚。
+
+<< 解析名字 >>= @
+	// 名字 → 下标。含 :: 的是全名，直接查；不含的拼上写这一行时所在的命名空间。
+	// 不回退：v2 会逐级向上找，v3 不找——名字只有一种读法。
+	size_t resolve(const Document& doc, const string& name, const vector<string>& ns,
+	               const string& file, int at_line) {
+		string full = name.find("::") == string::npos ? join_ns(ns, name) : name;
+		auto it = doc.index.find(full);
+		if (it == doc.index.end())
+			throw Error(file, at_line, "未定义的 chunk：" + full);
+		return it->second;
+	}
+~@
+
+报错里出现的是**拼好的全名**，不是作者写的短名。作者要看到的是"系统认为你指的是谁"：一个拼错的短名若只换来"你写的那个名字不存在"，而它明明就在眼前，那这条错误等于没说。
+
+`file` 与 `at_line` 是调用方给的，不是名字自己带的。名字只是字符串，它不知道自己写在哪一行——这件事只有记着那一行的人清楚。
+
+## 四、贴：引用是复制
+
+`expand` 是全篇唯一递归的地方。
+
+把一块展开后的行数记作 $L(c)$：它体里有 $m$ 行普通行，引用了 $k$ 个块 $c_1,\dots,c_k$。
+
+$$
+L(c) = m + \sum_{i=1}^{k} L(c_i)
+$$
+
+这个式子说的是"引用是复制，不是指针"——被引用几次就展开几次。它也是环检测存在的理由：引用图里一旦有环，这个递归没有底，$L(c)$ 根本解不出来。
+
+所以 `stack` 记的是**祖先链**：从最外层到当前这层，路过哪些块。不用"访问过的集合"，因为同一块被两处引用是合法复用。集合会把第二次引用误判成环；链只记"我正在谁里面"，那才是环。
+
+<< 展开 >>= @
+	namespace {
+
+	// 一行产物：文本，加上"它来自哪一篇的第几行"（--debug 的 #line 用）。
+	struct Out {
+		string text;
+		string src;
+		int no = 0;
+	};
+
+	// 把一块展开成行：实例就递归（缩进叠加），普通行加上缩进原样贴。
+	// stack 是祖先链，不是"访问过的集合"：同一块被两处引用是合法复用。
+	void expand(const Document& doc, size_t idx, const string& indent, const string& file,
+	            int at_line, vector<Out>& out, vector<size_t>& stack) {
+		const Chunk& c = doc.chunks[idx];
+		for (size_t s : stack)
+			if (s == idx) throw Error(file, at_line, "chunk 循环实例化：" + c.name);
+		if (c.todo) return;   // 还没写完：展开成空，不把半截代码贴进产物
+		stack.push_back(idx);
+		for (const Line& ln : c.lines) {
+			if (ln.kind == Line::Inst) {
+				size_t t = resolve(doc, ln.name, ln.ns, c.src_file, ln.no);
+				expand(doc, t, indent + ln.indent, c.src_file, ln.no, out, stack);
+				continue;
+			}
+			// 空行不加缩进：加了就变成"看着空、其实有空白"的行，diff 会打架。
+			out.push_back({ln.text.empty() ? string() : indent + ln.text, c.src_file, ln.no});
+		}
+		stack.pop_back();
+	}
+
+	}  // namespace
+~@
+
+三处讲究：
+
+- **空行留空**，不叠缩进。否则产物里到处是"看着空、其实有空白"的行，某些编辑器会自动裁掉，本地 diff 与 CI 的 diff 就对不上了。
+- **缩进是叠加的**（`indent + ln.indent`）。剥缩进时已经把每块自己那层排版缩进去掉了，剩下的是作者表达的层次，叠加才对。
+- **待办块展开成空**。`@todo` 的用途是先写下结构、把没写完的地方标出来；把半截代码贴进产物，只是把错误往后推。
+
+## 五、一个文件
+
+一个文件的内容 = 接线上的实例依次展开。这句话里藏着两个决定。
+
+**实例之间空一行。** 每块体首尾的空行在剥缩进时已经去掉了（那一篇的规矩），所以块与块之间的分隔只能在这里给。散文里的分隔不该只存在于阅读版，产物也要能读。
+
+**空展开不占行。** 待办块、空块展开出来是零行；若先往结果里塞一个空行再展开，产物里就会多出一个孤零零的空行，看着像"这里本来有内容"。所以先展开到临时向量，非空才追加。
+
+<< 一个文件 >>= @
+	namespace {
+
+	// 只有 C/C++ 认得 #line；写进 Makefile 或 YAML 里就是语法错。
+	bool c_like(const string& type) {
+		return type == "c" || type == "h" || type == "cc" || type == "cpp" || type == "hpp";
+	}
+
+	}  // namespace
+
+	// 一个文件的内容 = 接线上的实例依次展开。
+	string file_text(const Document& doc, const FileNode& f, bool line_mode) {
+		vector<Out> out;
+		vector<size_t> stack;
+		for (const Inst& in : f.body) {
+			vector<Out> part;
+			expand(doc, resolve(doc, in.name, in.ns, in.file, in.line), "", in.file, in.line, part,
+			       stack);
+			if (part.empty()) continue;               // 待办块、空块：不产出，也不留一个孤零零的空行
+			if (!out.empty()) out.push_back(Out{});   // 实例之间空一行
+			out.insert(out.end(), part.begin(), part.end());
+		}
+
+		// 行号：断了才插一条。每行一条 #line，产物就没法读了。
+		string text;
+		string last_src;
+		int last_no = 0;
+		bool numbered = line_mode && c_like(f.type);
+		for (const Out& o : out) {
+			if (numbered && o.no > 0) {
+				if (o.src != last_src || o.no != last_no + 1)
+					text += "#line " + std::to_string(o.no) + " \"" + o.src + "\"\n";
+				last_src = o.src;
+				last_no = o.no;
+			}
+			text += o.text;
+			text.push_back('\n');
+		}
+		return text;
+	}
+~@
+
+`#line` 只在一处有回报：**`.nw` 里的编译错误，报的就是 `.nw` 的行号**。所以它默认关着，命令行给 `--debug` 才打开——平时读产物的人不需要它，需要它的是被编译器指到一个 `.cpp` 行号、正在倒推回源文件的人。
+
+只在 C/C++ 上开：`#line` 是预处理指令，写进 `Makefile` 或 YAML 就是语法错。判断按**文件类型**走，不按后缀猜——类型是作者声明的，后缀是拼出来的。
+
+## 六、铺盘
+
+树是从 `top` 往上长出来的，所以铺盘就是一次深度优先：dir 建目录，file 写内容。
+
+两个检查顺手就做了，不需要单独一趟：
+
+- **路径唯一**。把走过的逻辑路径放进 `seen`；同一个路径被挂载两次就报错（同目录下不能有两个同名文件）。文件要按**加上后缀之后**的名字比：`util<cpp>` 与 `util<hpp>` 落成 `util.cpp` 与 `util.hpp`，不冲突。
+- **缺 `top`**。它不是一个普通目录，是"从这里开始铺"。没有它，铺出去的东西没有根。
+
+还有一条不是检查，是取舍：**挂载了但没写内容的 file 不落盘**。骨架先行的写法就是先挂上去、晚点再填，这中间不该产出空文件——空文件比没有文件更难查，编译能过，行为是空的。
+
+<< 铺盘 >>= @
+	namespace {
+
+	// 从 top 走树：dir 建目录，file 写内容。
+	void walk(const Document& doc, const string& root, const string& prefix, const DirNode& d,
+	          bool line_mode, set<string>& seen, int& written) {
+		for (const Mount& mt : d.mounts) {
+			string parent = prefix.empty() ? string() : prefix + "/";
+			if (mt.is_dir) {
+				string dir = parent + mt.name;
+				if (!seen.insert(dir).second)
+					throw Error(mt.file, mt.line, "物理路径冲突：" + dir + " 挂载了不止一次");
+				std::filesystem::create_directories(root + "/" + dir);
+				auto it = doc.dirs.find(mt.name);
+				// 挂载了但还没定义：目录照建，里面什么都没有。
+				if (it != doc.dirs.end())
+					walk(doc, root, dir, it->second, line_mode, seen, written);
+				continue;
+			}
+			string base = mt.type.empty() ? mt.name : mt.name + suffix_of(mt.type);
+			string path = parent + base;
+			if (!seen.insert(path).second)
+				throw Error(mt.file, mt.line, "物理路径冲突：" + path + " 挂载了不止一次");
+			auto it = doc.files.find(file_key(mt.name, mt.type));
+			if (it == doc.files.end() || !it->second.defined) continue;   // 还没写内容：不落盘
+			write_file(root + "/" + path, file_text(doc, it->second, line_mode));
+			++written;
+		}
+	}
+
+	}  // namespace
+
+	// 铺盘：从 top 开始，返回写了几个文件。
+	int tangle(const Document& doc, const string& outdir, bool line_mode) {
+		auto top = doc.dirs.find("top");
+		if (top == doc.dirs.end() || !top->second.defined)
+			throw Error(doc.main_file, 0, "缺少 dir top（tangle 的根）");
+		std::filesystem::create_directories(outdir);
+		set<string> seen;
+		int written = 0;
+		walk(doc, outdir, "", top->second, line_mode, seen, written);
+		return written;
+	}
+~@
+
+返回"写了几个文件"而不是 `void`：命令行要用它区分"什么都没有"与"铺了十个"。这类信息若让调用方自己数，两边迟早对不上。
+
+`create_directories` 是幂等的，所以这里不判"目录存在吗"——哪一层缺，它连父目录一起建。
+
+最后一行：把命名空间关上。
+
+<< tangle 的尾 >>= @
+	}  // namespace nw
+~@
+
+## 七、不做什么
+
+v2 的 `tangle` 里有三件事，v3 一件都不做：
+
+| v2 有 | 为什么 v3 没有 |
+|---|---|
+| 按 `@after` / `@before` 排序 | 顺序就是接线顺序，没有第二种 |
+| 判 `defined`（占位不落盘） | 没有"只声明"，有定义才有名字 |
+| 判 `inside`（被别人引用过的不落盘） | 只有接线能落盘，chunk 永远不直接落盘 |
+
+这三样都是 v2 模型（chunk 带路径、子块嵌在别人体里）的产物。模型一换，它们连同代码一起消失——这一篇比 v2 少了大约一半行数，少掉的不是被优化掉的，是本来就不该在。
+
+铺完盘之后还差一步：让人能用它。下一篇是入口。

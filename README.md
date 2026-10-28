@@ -1,67 +1,81 @@
 # neoweb
 
-AI 时代全新的文学编程工具。
+AI 时代重做文学编程：一份 `.nw` 源，tangle 出可编译的源码，weave 出你正在读的页面。
 
-## 希望解决的问题
+这本书本身就是这个工具——`book/` 里的每一篇既是章节，也是 `tangle/` 下源码的来源。
 
-AI 写代码的速度已经超过了人读代码的速度，理解的成本已然大到不可接受。neoweb 的解法是重拾文学编程的思想，将代码和叙述结合，写成既能读、又能跑的文档。
+## 依赖
+
+Ubuntu / Debian：
+
+```sh
+sudo apt-get install build-essential pkg-config \
+  libcmark-gfm-dev libcmark-gfm-extensions-dev \
+  libsource-highlight-dev python3
+```
+
+macOS：
+
+```sh
+brew install pkg-config cmark-gfm source-highlight
+```
+
+`libcmark-gfm` 是硬依赖：没有它就没有散文。`source-highlight` 是软依赖：缺了它页面照出，只是代码块不着色。编辑器插件只用 Node 跑一次语法生成，不装 npm 依赖。
 
 ## 快速开始
 
 ```sh
 git clone https://github.com/random25160765-collab/neoweb.git
 cd neoweb
+
+# 第一次：还没有 Makefile，用破点铺出它
+find book -name '*.nw' -exec python3 nw3.py tangle -o . {} +
+
+make              # 编译出 ./nw
+make web          # 渲染整站到 weave/
+make serve        # 本地预览，默认 http://127.0.0.1:8080
 ```
 
-编译 `nw` 二进制之前需要安装依赖：
+`-exec … {} +` 不能换成 `$(find …)`：篇的路径里有空格（`book/Chapter 1/…`），shell 的分词会把它切成两半。
 
-Ubuntu / Debian：
-```sh
-sudo apt-get install build-essential pkg-config \
-  libcmark-gfm-dev libcmark-gfm-extensions-dev \
-  libsource-highlight-dev python3 graphviz
+第一次之后，`Makefile` 与 `tangle/` 都有了，改书只要 `make`（会重新 tangle 并编译）或 `make web`（只渲染站点）。
+
+## 命令
+
+| 命令 | 做什么 |
+|---|---|
+| `make` | tangle 全书 → 编译 `./nw` |
+| `make check` | 只查源：重复实现、未实现的引用、挂载冲突、不可达的块 |
+| `make test` | 破点的用例（27 个语法与 tangle 用例） |
+| `make web` | 把每一篇渲成一页 HTML，按 `tangle/book.yaml` 排目录与上下章 |
+| `make serve` | 起一个静态服务器预览 `weave/` |
+| `make crosscheck` | 用破点重铺一遍，与自举产物逐字节比对 |
+| `make clean` | 删掉全部产物（`tangle/`、`weave/`、`nw`） |
+
+## 仓库里有什么
+
 ```
-macOS：
-```sh
-brew install cmark-gfm source-highlight graphviz
+book/       源：散文 + 语法 + 实现，全部由人写
+nw3.py      破点：只做 tangle 的 Python 实现，负责第一次
+tangle/     产物：C++ 源码与 book.yaml（不入库）
+weave/      产物：HTML（不入库）
+editor/     产物：VS Code 扩展目录（不入库）
+examples/   产物：附录 B 的示例程序（不入库）
+docs/       设计笔记，不参与构建
 ```
 
-同时环境里还要安装 Node。VS Code 插件另需三个 npm 依赖（`tm-grammars`、`vscode-oniguruma`、`vscode-textmate`），和 KaTeX 一起处理：
-
-```sh
-make deps         # npm install + 把 KaTeX 解到 tangle/vendor/
-```
-
-注意没有 KaTeX 的情况下，数学公式不会在输出页面里被渲染。
-
-```sh
-make              # 元层种子展开 → 编译 nw → 展开插件与语法 → 渲染整站到 weave/
-make install      # 装到 ~/.local；PATH 里没有就把该目录写进 shell 启动文件
-nw --version
-```
+`tangle/` 下的东西不要手改：它们由 `book/*.nw` 展开，改源才有效。
 
 ## 编辑器插件
 
-`book/Appendix C/plugin.nw` 展开出完整的 VS Code 插件（`tangle/editor/`）。打包安装：
-
 ```sh
-make deps
-make vsix
-code --install-extension tangle/nw-*.vsix
+make
+node editor/tools/gen-grammar.js                          # 写出语法文件
+ln -s "$PWD/editor" ~/.vscode/extensions/neoweb.nw        # 装成扩展目录
 ```
 
-也可以在 VS Code 的插件市场中下载扩展。
+重启窗口后，`.nw` 文件会有语法着色、语言配置与片段。插件只看着色，不做 tangle、不做跳转——那些交给 `nw` 本身。
 
-## 发布
-
-目前仅支持 Linux x86_64 和 macOS，见 GitHub Release：
-
-| 文件 | 内容 |
-|---|---|
-| `nw-X.Y.Z-linux-x86_64.tar.gz` | `nw`、`nw.1`、`LICENSE`，动态链接发行版的 `libcmark-gfm` 与 `source-highlight` |
-| `nw-X.Y.Z-macos-arm64.tar.gz` | 同上，动态链接 Homebrew 的对应库；运行前需要 `brew install cmark-gfm source-highlight` |
-| `nw-X.Y.Z.vsix` | 编辑器插件（也可从 VS Code 插件市场安装） |
-
-## License
+## 许可
 
 GPL-3.0-or-later，见 `LICENSE`。

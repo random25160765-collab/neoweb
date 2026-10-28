@@ -1,21 +1,33 @@
-# 纯片段，与延迟落盘
+# 纯片段，与接线顺序
 
-前三个示例的 chunk 都带路径，一块就是文件的一段。这个示例讲前面没讲的两件事：
+这个示例讲两件事：**纯片段**（不落盘，只能被引用）与**叙述顺序和落盘顺序分开**。
 
-- **纯片段**：名字里没有冒号，不落盘，只能被引用；
-- **`@after:`**：叙述顺序与落盘顺序分开。
+v2 里后一件事靠每块头上的 `@after:` 注解完成——一个块要自己声明"我得排在谁后面"。v3 取消了这个注解，也取消了排序：**顺序就是接线里的位置**。于是"我想先讲整体、再讲细节"变成了一句摆在外面的清单，而不是散在每块头上的约束。
 
-### 一、依赖
+## 一、接线
 
-先交代依赖：这个程序要 `printf`，所以先 `#include`。
+!! fragment::
 
-它在文档里排第一，落盘也在第一——不是因为它特殊，而是因为它没有任何 `@after:` 约束，而其余各块都排在它后面（拓扑排序里"没被约束的按文档位置挑"）。
+file<c> fragment @
+	<< 头 >>
+	<< print_rule >>
+	<< print_line >>
+	<< main >>
+~@
 
-<<tangle/fragment.c: includes>>= @
+`main` 在叙述里排第一（下一节就是它），在接线里排最后：C 要求先声明后使用，**叙述不欠这个债，落盘得还**。
+
+这块清单只有四行，但它就是整个文件的形状。想加一个函数，改这里；想让顺序不同，改这里。
+
+## 二、依赖
+
+先把 `printf` 借来。它排在清单第一位，落盘也在第一位。
+
+<< 头 >>= @
 	#include <stdio.h>
 ~@
 
-### 二、先看程序长什么样
+## 三、先看程序长什么样
 
 三行输出，上下各一条分隔线：
 
@@ -30,34 +42,31 @@
 
 缩进会加到展开内容的每一行，所以下面 `main` 里的引用缩进一个 tab，展开出来也是缩进一个 tab。
 
-这一块还声明了 `@after: print_rule, print_line`：叙述上先给读者看整体形状，落盘时必须排在两个被调用的函数之后。C 要求先声明后使用，**叙述不欠这个债，落盘得还**。
-
-<<tangle/fragment.c: main>>= @
-@after: print_rule, print_line
+<< main >>= @
 	int main(void) {
-		<<rule>>
+		<< rule >>
 		print_line("alpha");
 		print_line("beta");
-		<<rule>>
+		<< rule >>
 		return 0;
 	}
 ~@
 
-### 三、被引用的片段
+## 四、被引用的片段
 
-`<<rule>>` 只有一句调用。名字里没有路径，所以它不会落盘——它只是"这句话在这里出现一次"的缩写。
+`<< rule >>` 只有一句调用。它没有被接进任何 `file`，所以不落盘——它只是"这句话在这里出现一次"的缩写。
 
 片段复用的是**代码**，不是参数：同一个片段被两处引用，展开出来就是两份一模一样的代码。想要参数不同，就得写两个片段，或者干脆不用片段。这不是缺陷，是它的定义。
 
-<<rule>>= @
+<< rule >>= @
 	print_rule();
 ~@
 
-### 四、两个被调用的函数
+## 五、两个被调用的函数
 
 `print_rule` 打一条分隔线。没有参数，也不必知道调用者是谁。
 
-<<tangle/fragment.c: print_rule>>= @
+<< print_rule >>= @
 	static void print_rule(void) {
 		printf("---\n");
 	}
@@ -65,19 +74,21 @@
 
 `print_line` 打一个列表项。参数写成 `const char *` 而不是 `char *`：这个函数不打算改调用方的字符串，那就别给它改的权限。
 
-<<tangle/fragment.c: print_line>>= @
+<< print_line >>= @
 	static void print_line(const char *name) {
 		printf("- %s\n", name);
 	}
 ~@
 
-### 五、核对
+## 六、核对
 
 ```
-nw tangle "book/Appendix B/fragment.nw" .
-sed -n '1,14p' tangle/fragment.c   → #include 在最前，main 在最后
-cc -o fragment tangle/fragment.c
-./fragment                          → 三行输出
+nw tangle -o /tmp/ex book/skeleton.nw "book/Appendix B/fragment.nw"
+cc -o /tmp/ex/fragment /tmp/ex/examples/fragment.c && /tmp/ex/fragment
 ```
 
-落盘顺序是 `#include` → `print_rule` → `print_line` → `main`，而阅读顺序是 `#include` → `main` → 片段 → 两个函数。除了第一块，其余的顺序都被 `@after:` 改过——**两份顺序各自成立**，第三章的"排序"一节就是干这个的。
+落盘顺序是 `#include` → `print_rule` → `print_line` → `main`，而阅读顺序是 `#include` → `main` → 片段 → 两个函数。**两份顺序各自成立**，差别全部写在那四行接线里。
+
+这也解释了什么该叫短名：`rule` 是纯片段，`main` 是落盘块，两个名字在同一层命名空间里，各自只说自己的事。
+
+~::

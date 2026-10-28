@@ -1,8 +1,14 @@
-# 元层（手写，入库）：*.nw、Makefile、bootstrap.py、.gitignore
-# 其余全部是次生产物：留着就是同一个事实的两份，而两份迟早不一致。
+# 源（入库）：book/、nw3.py、README.md、LICENSE、docs/、assets/、.github/
+# 其余是产物或临时物：留着就是同一个事实的两份，而两份迟早不一致。
 
 tangle/
 weave/
+editor/
+examples/
+
+# 自举出来的二进制与"已铺"记号
+nw
+.tangle-stamp
 
 # Python 字节码
 __pycache__/

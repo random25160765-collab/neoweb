@@ -1,0 +1,369 @@
+# 从结构到 HTML
+
+上一篇把散文变成了 HTML 片段。这一篇画另一半：**块**。
+
+一块要回答三个问题——它落在哪个产物、它长什么样、点它能去哪。第一个问题只有树知道，第二个要把代码变成带颜色的文本，第三个要把 `<< 名字 >>` 变成链接。三件事干完，才谈得上一页。
+
+接线的清单在上一篇的 `file<cpp> weave @` 里，这一篇往 `<< weave 的尾 >>` 之前添五个名字：`<< 块落在哪 >>`、`<< 着色 >>`、`<< 一个块 >>`、`<< 接线 >>`、`<< 样式 >>`，再往后是 `<< 页面外壳 >>`。着色排在"一个块"之前，因为后者调它。
+
+## 一、块落在哪个产物
+
+v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_sort>>`）。v3 没有——**块不知道自己属于哪个产物**，位置只由接线决定。
+
+那就走一遍树。从 `top` 往下，把每个 `file` 的挂载路径算出来，再看它的接线接到了哪些块，一层层跟到底。跟的时候要留意一件事：**引用是复制**，同一块被两个 `file` 接到，它就落进两个产物；这不是错误，是设计（代价在语法篇说过：会 ODR 违规，要共享请用目标语言自己的 `#include`）。
+
+<< 块落在哪 >>= @
+	// 树走一遍：file 键 → 盘上的路径。tangle 铺盘走的是同一棵树，这里为显示再走一遍。
+	void walk_paths(const Document& doc, const string& prefix, const DirNode& d,
+	                map<string, string>& out) {
+		for (const Mount& mt : d.mounts) {
+			string path = prefix.empty() ? mt.name : prefix + "/" + mt.name;
+			if (mt.is_dir) {
+				auto it = doc.dirs.find(mt.name);
+				if (it != doc.dirs.end()) walk_paths(doc, path, it->second, out);
+				continue;
+			}
+			if (!mt.type.empty()) path += suffix_of(mt.type);
+			out[file_key(mt.name, mt.type)] = path;
+		}
+	}
+
+	map<string, string> file_paths(const Document& doc) {
+		map<string, string> out;
+		auto top = doc.dirs.find("top");
+		if (top != doc.dirs.end()) walk_paths(doc, "", top->second, out);
+		return out;
+	}
+
+	// 一块出现在哪些产物里：顺着接线往下跟。seen 防环——环是 tangle 的错，
+	// 这里只求别转死：页面上少一个标签，不该让整本书渲不出来。
+	void homes_of(const Document& doc, size_t idx, const string& path,
+	              map<size_t, vector<string>>& out, set<size_t>& seen) {
+		if (!seen.insert(idx).second) return;
+		vector<string>& v = out[idx];
+		if (std::find(v.begin(), v.end(), path) == v.end()) v.push_back(path);
+		const Chunk& c = doc.chunks[idx];
+		for (const Line& ln : c.lines) {
+			if (ln.kind != Line::Inst) continue;
+			try {
+				homes_of(doc, resolve(doc, ln.name, ln.ns, c.src_file, ln.no), path, out, seen);
+			} catch (Error&) {
+			}
+		}
+	}
+
+	map<size_t, vector<string>> chunk_homes(const Document& doc) {
+		map<string, string> paths = file_paths(doc);
+		map<size_t, vector<string>> out;
+		for (const auto& kv : doc.files) {
+			if (!kv.second.defined) continue;   // 挂载了没写内容：没有产物可指
+			auto p = paths.find(kv.first);
+			string path = p == paths.end() ? kv.second.name : p->second;
+			set<size_t> seen;
+			for (const Inst& in : kv.second.body) {
+				try {
+					homes_of(doc, resolve(doc, in.name, in.ns, in.file, in.line), path, out, seen);
+				} catch (Error&) {
+				}
+			}
+		}
+		return out;
+	}
+~@
+
+两个 `catch` 都是空的，这在本文件里是唯一允许的做法：**名字错是 tangle 的活**。weave 遇到一个坏名字，正确反应是"这一处少一个标签"，而不是整页渲不出来——渲染器不该替检查器报错，也不该因为它没报而崩。
+
+## 二、着色
+
+代码块的底色是样式的事，颜色是着色器的事。这里用 `source-highlight` 的 C++ 接口：**进程内翻译，不 fork**。一本书几十页、几百块、几千次调用，每块 fork 一个进程就是几千次 `exec`，慢得没有道理。
+
+<< 着色 >>= @
+	// 着色：source-highlight 的 C++ 接口，进程内翻译，不 fork。
+	// 同一段代码会出现好几次（块被多处实例化），按（语言, 代码）缓存，第二次直接给。
+	string highlight(const string& code, const string& lang) {
+		static const map<string, string> kLang = {
+			{"c", "c.lang"},       {"h", "cpp.lang"},     {"cc", "cpp.lang"},
+			{"cpp", "cpp.lang"},   {"hpp", "cpp.lang"},   {"py", "python.lang"},
+			{"sh", "sh.lang"},     {"makefile", "makefile.lang"}, {"make", "makefile.lang"},
+		};
+		auto lit = kLang.find(lang);
+		if (lit == kLang.end()) return html_escape(code);   // 认不出的语言：不改动文字
+		static map<string, string> cache;
+		string key = lang + '\n' + code;
+		auto hit = cache.find(key);
+		if (hit != cache.end()) return hit->second;
+
+		string html;
+		try {
+			srchilite::SourceHighlight sh("htmlcss.outlang");
+			sh.setStyleFile("default.style");
+			std::istringstream in(code);
+			std::ostringstream out;
+			sh.highlight(in, out, lit->second);
+			html = out.str();
+			// 它给的是一份完整 HTML（生成器注释 + <pre><tt>）；只要中间那段，壳由调用方给。
+			size_t a = html.find("<pre>");
+			size_t b = html.rfind("</pre>");
+			if (a == string::npos || b == string::npos) {
+				html = html_escape(code);
+			} else {
+				string inner = html.substr(a + 5, b - a - 5);
+				size_t t0 = inner.find("<tt>");
+				size_t t1 = inner.rfind("</tt>");
+				if (t0 != string::npos && t1 != string::npos) inner = inner.substr(t0 + 4, t1 - t0 - 4);
+				html = inner;
+			}
+		} catch (...) {
+			html = html_escape(code);   // 缺库或缺语言文件：降级成纯文本，不让整页失败
+		}
+		cache[key] = html;
+		return html;
+	}
+~@
+
+三处讲究：
+
+**缓存键带语言。** 同一段文本按 C 与按 Python 着色，结果不同；只按代码文本做键，第二次就会拿到别人的颜色。
+
+**降级而不是失败。** 缺 `source-highlight` 的语言文件时，`highlight` 抛什么都有可能，所以这里 `catch (...)`——抓住一切，退回转义后的纯文本。构建的成败不该由"这台机器装没装美化工具"决定。
+
+**剥外壳。** 只要中间那一段，是因为外面的 `<pre class="code">` 由调用方给：一个块一张卡片，卡片的边框、内边距、圆角都在样式里，不在着色器的输出里。
+
+## 三、一块长什么样
+
+一个块在页面上是一张卡片：上面一行写"第几号、叫什么、落在哪"，下面是代码。
+
+序号是**篇内定义顺序**，从 1 开始。它不是为了好看：读者核对"产物里这块排第几"时，序号是唯一能跨页对齐的坐标。v2 也这么做，理由在那一版就成立——顺序是这本书的核心承诺之一。
+
+<< 一个块 >>= @
+	// 一遍渲染要用的两张表：块落在哪些产物、块链到哪个锚点。
+	// 装进一个结构，函数签名就不必长成一串参数。
+	struct Ctx {
+		map<size_t, vector<string>> homes;   // 块 → 产物路径（可多个）
+		map<size_t, string> href;            // 块 → 锚点（同页 #c-n，跨页 页名#c-n）
+	};
+
+	// 产物路径的后缀就是语言：`tangle/parse.cpp` 按 cpp 着色。
+	string lang_of(const string& path) {
+		size_t dot = path.rfind('.');
+		if (dot == string::npos) return string();
+		return path.substr(dot + 1);
+	}
+
+	string chunk_lang(const Ctx& ctx, size_t idx) {
+		auto it = ctx.homes.find(idx);
+		if (it == ctx.homes.end() || it->second.empty()) return string();
+		return lang_of(it->second.front());
+	}
+
+	// 一个名字 → 一个链接。找不到就画一条划掉的线：读者要看见"这里断了一处"，
+	// 而不是看到一行凭空消失的代码。
+	string chunk_link(const Document& doc, const Ctx& ctx, const string& name, const vector<string>& ns,
+	                  const string& file, int at_line) {
+		string label = "&lt;&lt; " + html_escape(name) + " &gt;&gt;";
+		size_t idx = SIZE_MAX;
+		try {
+			idx = resolve(doc, name, ns, file, at_line);
+		} catch (Error&) {
+		}
+		if (idx == SIZE_MAX) return "<span class=\"inst miss\">" + label + "</span>";
+		auto it = ctx.href.find(idx);
+		if (it == ctx.href.end() || it->second.empty())
+			return "<span class=\"inst\">" + label + "</span>";
+		return "<a class=\"inst\" href=\"" + html_escape(it->second) + "\">" + label + "</a>";
+	}
+
+	// 代码里的实例行：缩进照抄，名字变成链接。
+	string inst_link(const Document& doc, const Ctx& ctx, const Line& ln, const string& src) {
+		return html_escape(ln.indent) + chunk_link(doc, ctx, ln.name, ln.ns, src, ln.no);
+	}
+
+	// 一行一行拼：普通行攒成一段去着色，实例行单独出链接。
+	// 不能整体着色——着色器不认识 << >>，会把它们当成小于号与位移。
+	string code_html(const Document& doc, const Ctx& ctx, size_t idx) {
+		const Chunk& c = doc.chunks[idx];
+		string lang = chunk_lang(ctx, idx);
+		std::ostringstream out;
+		vector<string> run;
+		auto flush = [&]() {
+			if (run.empty()) return;
+			out << highlight(join_lines(run), lang) << "\n";
+			run.clear();
+		};
+		for (const Line& ln : c.lines) {
+			if (ln.kind != Line::Inst) {
+				run.push_back(ln.text);
+				continue;
+			}
+			flush();
+			out << inst_link(doc, ctx, ln, c.src_file) << "\n";
+		}
+		flush();
+		return out.str();
+	}
+
+	string chunk_html(const Document& doc, const Ctx& ctx, size_t idx, size_t seq) {
+		const Chunk& c = doc.chunks[idx];
+		std::ostringstream out;
+		out << "<figure class=\"chunk\" id=\"c-" << seq << "\">\n<figcaption>";
+		out << "<span class=\"seq\">" << seq << "</span>";
+		out << "<span class=\"cname\">&lt;&lt; " << html_escape(c.name) << " &gt;&gt;</span>";
+		auto it = ctx.homes.find(idx);
+		if (it != ctx.homes.end())
+			for (const auto& p : it->second) out << "<span class=\"home\">" << html_escape(p) << "</span>";
+		out << "</figcaption>\n<pre class=\"code\"><code>" << code_html(doc, ctx, idx)
+		    << "</code></pre>\n</figure>\n";
+		return out.str();
+	}
+~@
+
+**为什么分段着色。** 整块代码一次性交给着色器最省事，但 `<< 名字 >>` 会被当成两个小于号加两个大于号，页面上就没有可点的链接了。于是按"普通行 / 实例行"切段：普通行整体着色，实例行单独出链接，最后都落进同一个 `<pre>`——**外层的壳只有一个，里面的颜色可以分段**。
+
+**为什么 `homes` 与 `href` 装进 `Ctx`。** 它们都是"这一遍渲染要用的表"：块落在哪、链到哪。装进一个结构，`chunk_html` 的签名就是"给我上下文、第几块、第几号"，读起来是一句话，而不是五样东西的排列。
+
+## 四、接线不是散文
+
+页面上还有第三种东西：`file ... @` 与 `dir ... @`。它们是**接线**，既不是散文也不是实现。若按散文渲染，`file<hpp> nw @` 里的 `<hpp>` 会被浏览器当成一个 HTML 标签，页面上只剩半行字——这是"漏认"的代价，比错认更隐蔽。
+
+所以接线要单独排：照原文一行一行出，**实例行变成链接**。读者读接线，读到的其实就是这一页的顺序——链接可点，等于给这一页配了一份目录。
+
+<< 接线 >>= @
+	// 接线块：照原文一行一行排，实例行变成链接。
+	// 一行可能有多个实例（用 | 连写），按出现顺序与 Inst 一一对应。
+	string wire_html(const Document& doc, const Ctx& ctx, const Piece& p) {
+		map<int, vector<const Inst*>> inst_at;   // 行号 → 这一行上的实例
+		if (!p.is_dir) {
+			auto it = doc.files.find(p.key);
+			if (it != doc.files.end())
+				for (const Inst& in : it->second.body) inst_at[in.line].push_back(&in);
+		}
+		std::ostringstream out;
+		out << "<figure class=\"wire\"><pre class=\"code\"><code>";
+		for (size_t k = 0; k < p.lines.size(); ++k) {
+			int no = p.first + static_cast<int>(k);
+			auto hit = inst_at.find(no);
+			if (hit == inst_at.end()) {
+				out << html_escape(p.lines[k]) << "\n";
+				continue;
+			}
+			const string& raw = p.lines[k];
+			size_t pos = 0, n = 0;
+			while (pos < raw.size()) {
+				size_t open = raw.find("<<", pos);
+				if (open == string::npos || n >= hit->second.size()) break;
+				size_t close = raw.find(">>", open + 2);
+				if (close == string::npos) break;
+				out << html_escape(raw.substr(pos, open - pos));
+				const Inst* in = hit->second[n++];
+				out << chunk_link(doc, ctx, in->name, in->ns, in->file, in->line);
+				pos = close + 2;
+			}
+			out << html_escape(raw.substr(pos)) << "\n";
+		}
+		out << "</code></pre></figure>\n";
+		return out.str();
+	}
+~@
+
+`dir` 体里只有挂载（`dir x;`、`file<c> y;`），没有实例，所以整个块照抄——`inst_at` 对它为空，循环自然走"原样输出"那一条。**不为目录写第二个函数**：一处多态靠数据空着来表达，比两个只差一个分支的函数更好读。
+
+## 五、样式
+
+一份 HTML 就是一份，不带外部样式表。理由很实际：这本书要能被人从任何地方双击打开——`file://` 下没有构建、没有服务、没有相对路径可以依赖。
+
+<< 样式 >>= @
+	// 一份 HTML 自带全部样式：双击就能看，不依赖构建、不依赖服务。
+	const char* css() {
+		return R"CSS(
+	:root { --fg:#1d1f23; --dim:#6a7280; --line:#e3e6ea; --bg:#fff; --code:#f7f8fa; --accent:#2f6f4f; }
+	* { box-sizing:border-box; }
+	body { margin:0; background:var(--bg); color:var(--fg);
+	  font:16px/1.85 -apple-system,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif; }
+	a { color:var(--accent); text-decoration:none; }
+	a:hover { text-decoration:underline; }
+	nav.side { position:fixed; top:0; left:0; width:16rem; height:100vh; overflow:auto;
+	  padding:2rem 1.2rem; border-right:1px solid var(--line); font-size:.86rem; line-height:1.7; }
+	nav.side .part { margin:1.2rem 0 .35rem; color:var(--dim); font-size:.78rem; letter-spacing:.04em; }
+	nav.side a { display:block; padding:.12rem 0; color:var(--fg); }
+	nav.side a.here { color:var(--accent); font-weight:600; }
+	nav.side a.title { font-weight:700; margin-bottom:.9rem; color:var(--fg); }
+	ul.toc { list-style:none; padding:0; margin:.6rem 0 1.8rem; }
+	ul.toc li { margin:.25rem 0; }
+	main { margin-left:16rem; padding:3rem 2.5rem 6rem; }
+	article { max-width:40rem; }
+	h1 { font-size:1.9rem; line-height:1.35; margin:0 0 1.5rem; }
+	h2 { font-size:1.25rem; margin:2.6rem 0 .8rem; padding-bottom:.3rem; border-bottom:1px solid var(--line); }
+	h3 { font-size:1.05rem; margin:2rem 0 .6rem; }
+	p { margin:.9rem 0; }
+	code { font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace; font-size:.88em;
+	  background:var(--code); padding:.1em .35em; border-radius:3px; }
+	pre.code { background:var(--code); margin:.4rem 0 0; padding:.9rem 1rem; overflow:auto;
+	  font-size:.84rem; line-height:1.6; }
+	pre.code code { background:none; padding:0; font-size:1em; }
+	pre.code .comment { color:var(--dim); font-style:italic; }
+	pre.code .keyword, pre.code .preproc { color:#a33; }
+	pre.code .type, pre.code .usertype, pre.code .classname { color:var(--accent); }
+	pre.code .string, pre.code .specialchar { color:#8a5a00; }
+	pre.code .number, pre.code .function { color:#3b5b9c; }
+	pre.sample { background:var(--code); padding:.9rem 1rem; overflow:auto; border-radius:4px; }
+	figure.wire { margin:1.2rem 0; }
+	figure.wire pre.code { margin:0; border-radius:4px; border:1px dashed var(--line); }
+	blockquote { margin:1.2rem 0; padding:.2rem 1rem; border-left:3px solid var(--line); color:var(--dim); }
+	table { border-collapse:collapse; margin:1.2rem 0; font-size:.92rem; }
+	th,td { text-align:left; padding:.45rem .8rem; border-bottom:1px solid var(--line); vertical-align:top; }
+	th { font-weight:600; border-bottom:2px solid var(--line); }
+	figure.chunk { margin:1.4rem 0; border:1px solid var(--line); border-radius:4px; overflow:hidden; }
+	figure.chunk figcaption { display:flex; gap:.6rem; align-items:baseline; flex-wrap:wrap;
+	  padding:.45rem .9rem; background:var(--code); border-bottom:1px solid var(--line);
+	  font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace; font-size:.8rem; }
+	figure.chunk .seq { color:var(--accent); font-weight:700; }
+	figure.chunk .home { margin-left:auto; color:var(--dim); }
+	span.inst { color:var(--accent); }
+	span.inst.miss { color:#a33; text-decoration:line-through; }
+	.miss { color:#a33; }
+	.pager { display:flex; justify-content:space-between; margin:4rem 0 0; padding-top:1.2rem;
+	  border-top:1px solid var(--line); font-size:.9rem; }
+	@media (max-width:64rem) {
+	  nav.side { position:static; width:auto; height:auto; border-right:0;
+	    border-bottom:1px solid var(--line); padding:1rem 1.5rem; }
+	  main { margin-left:0; padding:2rem 1.5rem 4rem; }
+	}
+	)CSS";
+	}
+~@
+
+样式只有一条判据：**读者不该注意到它**。所以色板压到四个色（正文字、次要字、线、强调），字号只有四档，圆角统一成两个值。`@media` 一档是为了窄屏：左栏落回顶部，变成一份普通目录。
+
+`pre.code` 底下那五行是给着色器配的颜色。着色器只负责把代码切成 `class="keyword"` 这样的词，**颜色不在它手里**——它自带的那份样式表有二十几个色号，装进来这本书就成了调色盘。这里只认四类：注释（次要字，斜体）、关键字与预处理（红）、类型（强调色）、字符串与数字（棕、蓝）。剩下的 `normal`、`symbol`、`cbracket` 没有规则，继承正文字色——这正是要的：标点不该抢眼。
+
+这份对照表有个前提：类名是 `source-highlight` 的契约，换一个着色器就得换一张表。所以它写在样式里、不写在 `highlight` 里——**换引擎时改的是颜色，不是逻辑**。
+
+## 六、页面外壳
+
+外壳只做三件事：写 `<!doctype>`、把样式塞进 `<style>`、把导航与正文摆进两个容器。它不知道正文里有什么，也不知道导航从哪来——**两者都是字符串，谁调用谁负责**。
+
+<< 页面外壳 >>= @
+	// 外壳不认识正文，也不认识导航：两者都是字符串，谁调用谁负责。
+	string page_shell(const string& title, const string& nav, const string& body) {
+		std::ostringstream out;
+		out << "<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n"
+		    << "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+		    << "<title>" << html_escape(title) << "</title>\n<style>" << css() << "</style>\n</head>\n<body>\n";
+		if (!nav.empty()) out << "<nav class=\"side\">" << nav << "</nav>\n";
+		out << "<main><article>\n" << body << "</article></main>\n</body>\n</html>\n";
+		return out.str();
+	}
+~@
+
+## 七、这一篇到哪为止
+
+块、颜色、样式、外壳都在了，但**还没有人调用它们**：谁把一篇源走成一块一块、谁决定序号、谁拼这一页，是后面两篇的事。
+
+验收仍是编译这一层（同样带临时豁免，等接线的人出现就取消）：
+
+```
+python3 nw3.py tangle -o /tmp/w5 book/skeleton.nw "book/Chapter 3"/*.nw book/Chapter\ 4/1-cli.nw book/Chapter\ 5/*.nw
+g++ -std=c++17 -Wall -Wextra -Wno-unused-function -I/tmp/w5/tangle -c /tmp/w5/tangle/weave.cpp
+```
+
+但着色现在就能真跑：把一段本文里的代码喂给 `highlight`，看它吐出来的是不是只有 `<span class="…">`，没有那些外壳。下一篇是目录——一页之所以能叫"书里的一页"，是因为它知道自己在书里的位置。

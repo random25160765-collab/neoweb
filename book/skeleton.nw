@@ -1,0 +1,72 @@
+# 骨架
+
+这一篇只做一件事：把 tangle 的目标 repo 画出来。它不含实现，只有目录与挂载。
+
+v2 里这一步是散在各篇的 `tangle/parse.cpp @` 里，读者要读完所有篇才知道产出什么。v3 把它提到一处：**先声明 repo 的形状，再往里填 chunk**。
+
+`top` 是保留字，代表 tangle 的输出根。它不是目录，是"从这里开始铺"。
+
+dir top @
+	dir tangle;
+	dir examples;
+	dir editor;
+	file Makefile;
+~@
+
+`top` 下挂了两样：一个目录 `tangle/`，一份构建规则 `Makefile`。前者是实现的全部——八个产物分四类：模型（`nw.hpp`）、工具（util）、三个阶段（parse、tangle、weave）、站点（serve）、入口（main），以及一份数据（book.yaml）。
+
+dir tangle @
+	file<hpp> nw;
+	file<cpp> util;
+	file<cpp> parse;
+	file<cpp> tangle;
+	file<cpp> weave;
+	file<cpp> main;
+	file<cpp> serve;
+	file<yaml> book;
+~@
+
+注意这里只有**挂载**（`file ...;`），没有内容。内容在别的篇里用 `file ... @` 定义，两边靠名字对上。挂载与定义分开，是 v3 与 v2 最大的不同之一：文件出现在哪个目录，和它的内容写在哪一篇，是两件事。
+
+`examples/` 是附录 B 那七个小程序。它们也是产物——落盘、编译、运行，一个都不少——但不属于这个工具，所以不放进 `tangle/`：**目录本身也是一句话**，"这个文件是工具的一部分吗"，`ls` 一眼就答了。
+
+dir examples @
+	file<c> hello;
+	file<c> fragment;
+	file<h> pair;
+	file<c> pair;
+	file<c> sort;
+	file<c> chardev;
+	file<cu> gemm;
+	file<py> attention;
+~@
+
+`editor/` 是附录 C 那个插件。它比 `examples/` 多一层子目录——VS Code 的扩展按位置找文件（清单、语言配置、语法、片段、图标各在约定的地方），所以这一处的形状是**别人定的**，不是我们挑的。
+
+dir editor @
+	dir snippets;
+	dir tools;
+	dir icons;
+	file<json> package;
+	file<json> language-configuration;
+	file<js> extension;
+~@
+
+dir snippets @
+	file<json> nw;
+~@
+
+dir tools @
+	file<js> gen-grammar;
+~@
+
+dir icons @
+	file<svg> nw;
+	file<svg> nw-dark;
+~@
+
+书稿自己（`book/*.nw`）不在骨架里。它是源，不是产物——自举的边界就在这里：tangle 铺出 `tangle/` 与 `Makefile`，`book/` 由人写。
+
+仓库里还有几样东西也不在这张图上：`nw3.py`（破点，手写；它若成了产物，自举就成环）、`test_nw3.py`（它的用例）、`LICENSE`（法律文本必须逐字）、`.github/`（GitHub 读的配置）、`docs/`（设计期的笔记，这本书的来路）、`assets/`（图标）、`README.md`（入口）。它们各自有主人，但都不是 tangle。骨架只回答一个问题：**这本书铺出来的是哪棵树**——把仓库里每一个文件都塞进来，回答的就不是这个问题了。
+
+`Makefile` 是唯一落在根上的产物，内容在附录 A。它挂在 `top` 而不是 `tangle`，因为它必须在仓库根被 `make` 找到；挂在哪里，就出现在哪里——这条规则对目录与文件是同一条。

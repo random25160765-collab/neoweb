@@ -10,27 +10,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config python3 \
+            libcmark-gfm-dev libcmark-gfm-extensions-dev libsource-highlight-dev
+
+      # 破点只在第一次出现：它铺出 Makefile 与 tangle/，之后交给 nw 自己。
+      # 用 -exec … {} + 交文件：篇的路径里有空格，command substitution 会把它切开。
+      - name: 破点展开
+        run: find book -name '*.nw' -exec python3 nw3.py tangle -o . {} +
+
+      - name: 构建
+        run: make
+
+      - name: 语法与约束
+        run: make check
+
+      - name: 破点用例
+        run: make test
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: 编译依赖
+      - name: 编辑器语法
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config python3 graphviz \
-            libcmark-gfm-dev libcmark-gfm-extensions-dev libsource-highlight-dev
+          node editor/tools/gen-grammar.js
+          node -e "JSON.parse(require('fs').readFileSync('editor/syntaxes/nw.tmLanguage.json','utf8'))"
 
-      - name: npm 依赖与 KaTeX
-        run: make deps
+      - name: 整站
+        run: make web
 
-      - name: 构建全链
-        run: make
-
-      - name: 产物对账
-        run: make verify
-
-      - name: 语法条款
-        run: make test
-
-      - name: 全书解析
-        run: make check
+      - name: 两个实现
+        run: make crosscheck

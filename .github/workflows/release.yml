@@ -1,6 +1,6 @@
 name: release
 
-# 打 vX.Y.Z tag 即发布：产出两个平台的二进制包与编辑器插件，自动挂到 GitHub Release。
+# 打 vX.Y.Z tag 即发布：两个平台的二进制包与一份编辑器插件，自动挂到 GitHub Release。
 # 发布件不再手工搬运——CI 就是发布流程。
 
 on:
@@ -34,18 +34,21 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install pkg-config cmark-gfm source-highlight
 
+      - name: 破点展开
+        run: find book -name '*.nw' -exec python3 nw3.py tangle -o . {} +
+
       - name: 构建
-        run: make nw tangle/nw.1
+        run: make
 
       - name: 打包
         run: |
           ver="${GITHUB_REF_NAME#v}"
           dir="nw-$ver-${{ matrix.platform }}"
-          pkg="nw-$ver-${{ matrix.platform }}.tar.gz"
+          pkg="$dir.tar.gz"
           mkdir "$dir"
-          install -m 755 tangle/build/nw "$dir/nw"
-          install -m 644 tangle/nw.1 "$dir/nw.1"
-          cp LICENSE "$dir/LICENSE"
+          install -m 755 nw "$dir/nw"
+          install -m 644 LICENSE "$dir/LICENSE"
+          install -m 644 README.md "$dir/README.md"
           tar czf "$pkg" "$dir"
           if command -v sha256sum >/dev/null; then
             sha256sum "$pkg" > "$pkg.sha256"
@@ -58,7 +61,7 @@ jobs:
           name: nw-${{ matrix.platform }}
           path: nw-*.tar.gz*
 
-  vsix-and-release:
+  editor-and-release:
     needs: binary
     runs-on: ubuntu-24.04
     steps:
@@ -74,18 +77,25 @@ jobs:
           sudo apt-get install -y build-essential pkg-config python3 \
             libcmark-gfm-dev libcmark-gfm-extensions-dev libsource-highlight-dev
 
-      - name: npm 依赖与 KaTeX
-        run: make deps
-
       # 发布前完整走一遍构建链：发布件必须来自一个"整条链都是绿的"的提交
-      - name: 构建全链
+      - name: 破点展开
+        run: find book -name '*.nw' -exec python3 nw3.py tangle -o . {} +
+
+      - name: 构建
         run: make
 
-      - name: 产物对账
-        run: make verify
+      - name: 整站与对账
+        run: |
+          make web
+          make crosscheck
 
-      - name: 打包插件
-        run: make vsix
+      # 插件是目录形态的扩展（附录 C 的安装方式是软链进 extensions/），
+      # 所以发布件是 editor/ 的压缩包，而不是 vsix——vsix 需要 marketplace 的账号体系。
+      - name: 插件
+        run: |
+          node editor/tools/gen-grammar.js
+          ver="${GITHUB_REF_NAME#v}"
+          tar czf "nw-$ver-editor.tar.gz" editor
 
       - name: 收集产物
         uses: actions/download-artifact@v4
@@ -98,4 +108,4 @@ jobs:
         with:
           files: |
             dist/*
-            tangle/nw-*.vsix
+            nw-*-editor.tar.gz

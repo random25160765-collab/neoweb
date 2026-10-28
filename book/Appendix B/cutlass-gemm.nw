@@ -17,9 +17,21 @@ GEMM 的形状是 `C = alpha * A * B + beta * C`，三个矩阵都按列主序�
 
 `ldc` 单独给，因为 C 的布局不必和 A 相同。
 
-showcase/gemm.cu @
 
-<<problem>>= @
+!! gemm::
+
+file<cu> gemm @
+	<< problem >>
+	<< policy >>
+	<< policy-explicit >>
+	<< block-tile >>
+	<< mainloop >>
+	<< warp-slice >>
+	<< mma >>
+	<< launch >>
+~@
+
+<< problem >>= @
 	// 主机侧拿到的全部信息：形状、三个指针、三个 leading dimension、两个标量。
 	cudaError_t gemm_nn(int M, int N, int K,
 	                    float alpha, const float* A, int lda,
@@ -27,13 +39,14 @@ showcase/gemm.cu @
 	                    float beta,        float* C, int ldc);
 ~@
 
+
 ### 二、策略：模板参数不是配置，是设计
 
 CUTLASS 把"用什么招"写成类型。下面这一行是整份代码里信息密度最高的一行：每个模板参数都在选择一种实现。
 
 `float` 与 `ColumnMajor` 各出现三次，不是重复——**A、B、C 的布局可以各不相同**，混着用是常见需求（比如 A 行主序、C 列主序）。
 
-<<policy>>= @
+<< policy >>= @
 	using ColumnMajor = cutlass::layout::ColumnMajor;
 
 	// 三组 (元素类型, 布局)：A、B、C 各自独立。
@@ -43,9 +56,10 @@ CUTLASS 把"用什么招"写成类型。下面这一行是整份代码里信息�
 	    float, ColumnMajor>;  // C
 ~@
 
+
 只写六行就能跑，代价是没得调。真要调的时候，把 `Gemm` 换成显式指定 tile / warp / 指令形状的那一版——**同一个抽象层，往下一格**：
 
-<<policy-explicit>>= @
+<< policy-explicit >>= @
 	// 往下一格：把"策略"拆成三组数字。
 	using GemmExplicit = cutlass::gemm::device::Gemm<
 	    float, ColumnMajor, float, ColumnMajor, float, ColumnMajor,
@@ -58,6 +72,7 @@ CUTLASS 把"用什么招"写成类型。下面这一行是整份代码里信息�
 	    cutlass::epilogue::thread::LinearCombination<float, 1, float, float>>;
 ~@
 
+
 三个 `GemmShape` 是同一件事的三个尺度：线程块切 C、warp 切线程块、一条指令切 warp。
 
 ### 三、线程块：这块 C 归谁
@@ -66,7 +81,7 @@ CUTLASS 把"用什么招"写成类型。下面这一行是整份代码里信息�
 
 写 `min(...)` 那两句不是防御性编程：`M`、`N` 很少是 tile 的整数倍，最后一行/列必须钳住，否则会写穿。
 
-<<block-tile>>= @
+<< block-tile >>= @
 	// 这个线程块负责 C 的哪一块。边界必须钳住：M、N 通常不是 tile 的整数倍。
 	int block_m = blockIdx.y * BN;
 	int block_n = blockIdx.x * BM;
@@ -74,13 +89,14 @@ CUTLASS 把"用什么招"写成类型。下面这一行是整份代码里信息�
 	int tile_n = min(BM, N - block_n);
 ~@
 
+
 ### 四、主循环：沿 K 走，A、B 轮流进共享内存
 
 K 维不切给线程块——它是**累加方向**。每走一步，搬一小片 A 与一小片 B 进共享内存，算一次，再走。
 
 两行 `cp.async` 是现代写法：拷贝与计算重叠，搬完之前不算。老写法是 `__syncthreads()` 干等，性能差一截。
 
-<<mainloop>>= @
+<< mainloop >>= @
 	// K 维是累加方向，不切给线程块；每步搬一小片 A、B 到共享内存。
 	cutlass::arch::cp_async_fence();
 	for (int k = 0; k < K; k += BK) {
@@ -99,17 +115,19 @@ K 维不切给线程块——它是**累加方向**。每走一步，搬一小�
 	}
 ~@
 
+
 ### 五、warp：把共享内存里那一片再切一次
 
 一个线程块里有若干 warp，warp 之间不共享寄存器。所以这一层要做的是：**每个 warp 领一小块 C，各自算完，不通信**。
 
 `warp_m`、`warp_n` 来自 `threadIdx` 的高位——这是 CUTLASS 里"线程编号怎么切"的全部秘密：低位给指令，高位给 tile。
 
-<<warp-slice>>= @
+<< warp-slice >>= @
 	// 一个线程块 128×128，warp 拿 64×64：2×2 个 warp 铺满，互不通信。
 	int warp_m = (threadIdx.y * 32) / 64;   // 高位定 tile
 	int lane   = threadIdx.x % 32;          // 低位定"我在指令里的哪个位置"
 ~@
+
 
 ### 六、指令：一条 `mma.sync` 吃 16×8×4
 
@@ -117,7 +135,7 @@ K 维不切给线程块——它是**累加方向**。每走一步，搬一小�
 
 写这段的人不需要知道 warp 在算哪一块，只需要知道**一个 warp 的 32 个线程怎么拼成一个 16×8 的矩阵**。这是四层里唯一一层，读者必须先知道硬件约定才能读懂代码。
 
-<<mma>>= @
+<< mma >>= @
 	asm volatile(
 	    "mma.sync.aligned.m16n8k4.row.col.f32.f32.f32.f32 "
 	    "{%0,%1,%2,%3}, {%4,%5}, {%6}, {%7,%8,%9,%10};\n"
@@ -126,13 +144,14 @@ K 维不切给线程块——它是**累加方向**。每走一步，搬一小�
 	      "f"(c0), "f"(c1), "f"(c2), "f"(c3));
 ~@
 
+
 ### 七、主机侧：构造参数，然后 launch
 
 CUTLASS 的参数对象是**按值传进 kernel** 的。理由写在它的设计文档里：kernel 入口的初始化开销要压到最低，而主机侧有充裕的时间拼参数。
 
 `can_implement` 先做一次静态检查（对齐、尺寸），再 `operator()`——**错误在 launch 之前就能报**，不用等 CUDA 的异步错误回调。
 
-<<launch>>= @
+<< launch >>= @
 	Gemm gemm_op;
 	Gemm::Arguments args({M, N, K},   // 问题
 	                     {A, lda}, {B, ldb}, {C, ldc},   // 三个指针与步长
@@ -144,10 +163,12 @@ CUTLASS 的参数对象是**按值传进 kernel** 的。理由写在它的设计
 	status = gemm_op(args);   // 真正 launch
 ~@
 
+
 ### 八、这一篇想说明什么
 
 四层各有一个 chunk，各讲一句"这一层只回答什么"。这正是文学化源码擅长的形状：**层与层之间有明确的边界，而边界本身值得写一段话**。
 
 主循环里那段最内层的 `for (kk ...)`，在原文里是一整段模板展开。这里照原样放进去，不再抽成片段——**一个只被引用一次的名字，只是多了一层查找**。
 
-~@
+~::
+

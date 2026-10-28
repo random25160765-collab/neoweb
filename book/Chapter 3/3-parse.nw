@@ -1,0 +1,602 @@
+# 解析器
+
+这一篇产 `tangle/parse.cpp`：把 `.nw` 文本变成「一张表 + 一棵树」。
+
+解析器只做三件事：认清这一行是什么、把它记到该去的地方、报错时给出行号。所有"这是什么意思"的判断都在别处。
+
+## 一、接线
+
+file<cpp> parse @
+	<< parse 的头 >>
+	<< 剥注释 >>
+	<< 认形状 >>
+	<< 命名空间前缀 >>
+	<< 解析器状态 >>
+	<< 结构层的小工具 >>
+	<< 结构层 >>
+	<< file 体 >>
+	<< chunk 体 >>
+	<< 剥缩进 >>
+	<< 入栈出栈 >>
+	<< 入口 >>
+	<< 合并多篇 >>
+~@
+
+## 二、头
+
+<< parse 的头 >>= @
+	#include "nw.hpp"
+
+	namespace nw {
+	namespace {
+
+	using std::isalnum;
+~@
+
+## 三、剥注释
+
+`%%` 成对，**只在块外**剥。块内是目标语言的代码，`printf("%%d")` 不能被吃掉。
+
+整行注释会留下一行空行——删行会让后面所有报错的行号错位。
+
+这里返回剥完的行，不改行号。
+
+<< 剥注释 >>= @
+	// 块外的一行：成对的 %% 之间删掉；反引号里是字面，跳过。
+	// 没有转义字符：散文里出现成对的 %% 一定是注释，要展示它就写进反引号或围栏。
+	string strip_comment(const string& ln) {
+		string out;
+		size_t i = 0;
+		while (i < ln.size()) {
+			if (ln[i] == '`') {
+				size_t e = ln.find('`', i + 1);
+				if (e == string::npos) { out.push_back(ln[i]); ++i; continue; }
+				out.append(ln, i, e - i + 1);
+				i = e + 1;
+				continue;
+			}
+			if (ln[i] == '%' && i + 1 < ln.size() && ln[i + 1] == '%') {
+				size_t e = ln.find("%%", i + 2);
+				if (e == string::npos) throw Error("", 0, "注释没有闭合：%%");
+				i = e + 2;
+				continue;
+			}
+			out.push_back(ln[i]);
+			++i;
+		}
+		return out;
+	}
+~@
+
+## 四、认形状
+
+四种认法，都只认整行，都"宁可漏认不可错认"：
+
+- 围栏：三个以上反引号；
+- 块头：整行是 `<< 名字 >>= @`；
+- 实例：整行由 `<<…>>` 与 `|` 组成；
+- 命名空间前缀：行首若干 `a::`。
+
+<< 认形状 >>= @
+	bool fence_open(const string& ln, string& run) {
+		string t = trim(ln);
+		size_t n = 0;
+		while (n < t.size() && t[n] == '`') ++n;
+		if (n < 3) return false;
+		run = t.substr(0, n);
+		return true;
+	}
+
+	bool fence_close(const string& ln, const string& run) {
+		string t = trim(ln);
+		return t.size() >= run.size() && t.compare(0, run.size(), run) == 0;
+	}
+
+	// 整行是 `<< 名 >>= @`。
+	bool chunk_head(const string& t, string& name) {
+		if (!has_prefix(t, "<<")) return false;
+		size_t e = t.find(">>", 2);
+		if (e == string::npos) return false;
+		string rest = trim(t.substr(e + 2));
+		if (rest.empty() || rest[0] != '=') return false;
+		rest = trim(rest.substr(1));
+		if (rest != "@") return false;
+		name = trim(t.substr(2, e - 2));
+		return !name.empty();
+	}
+
+	// 整行由 <<…>> 与 | 组成：这是接线。
+	bool inst_line(const string& t, vector<string>& names) {
+		size_t i = 0;
+		bool any = false;
+		while (i < t.size()) {
+			while (i < t.size() && (t[i] == ' ' || t[i] == '\t')) ++i;
+			if (i < t.size() && t[i] == '|') { ++i; continue; }
+			if (i + 1 < t.size() && t[i] == '<' && t[i + 1] == '<') {
+				size_t e = t.find(">>", i + 2);
+				if (e == string::npos) return false;
+				string nm = trim(t.substr(i + 2, e - i - 2));
+				if (nm.empty()) return false;
+				names.push_back(nm);
+				any = true;
+				i = e + 2;
+				continue;
+			}
+			return false;
+		}
+		return any;
+	}
+~@
+
+## 五、命名空间前缀
+
+`x::` 是使用处引入。但它与 chunk 名 `x::a` 长得像，区别在于**前缀之后还剩什么**：
+
+- `x:: <<a>>` —— 引入后接线，是引入；
+- `x::a` —— 前缀后是名字尾巴，是 chunk 名。
+
+所以先把行首的 `a::` 全读出来，再看剩下的是不是空或实例行。剩下的不是，就退回当普通内容。
+
+<< 命名空间前缀 >>= @
+	// 从 t 的行首读 "a::b::"。读到哪算哪，剩下的是 rest。
+	// 返回 true 表示至少读到了完整的一段。
+	bool read_ns_prefix(const string& t, vector<string>& segs, string& rest) {
+		size_t i = 0;
+		while (true) {
+			size_t j = i;
+			while (j < t.size()) {
+				char c = t[j];
+				if (isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.') ++j;
+				else break;
+			}
+			if (j == i) { rest = t.substr(i); return !segs.empty(); }
+			if (j + 1 < t.size() && t[j] == ':' && t[j + 1] == ':') {
+				segs.push_back(t.substr(i, j - i));
+				i = j + 2;
+				continue;
+			}
+			rest = t.substr(i);
+			return !segs.empty();
+		}
+	}
+
+	// 行尾的 ~:: 串，返回个数并截掉。
+	int take_ns_close(string& t) {
+		int n = 0;
+		while (t.size() >= 3 && t.compare(t.size() - 3, 3, "~::") == 0) {
+			t.erase(t.size() - 3);
+			t = rtrim(t);
+			++n;
+		}
+		return n;
+	}
+
+	// 整行是若干 ~:: 。
+	bool only_ns_close(const string& t, int& n) {
+		string s = t;
+		n = take_ns_close(s);
+		return n > 0 && s.empty();
+	}
+~@
+
+## 六、状态
+
+块栈只记"我现在在谁的体里"，节点本身在文档里。
+
+<< 解析器状态 >>= @
+	struct Frame {
+		char kind;     // 'd' dir / 'f' file / 'c' chunk
+		string name;   // dir 名 / file 键 / chunk 全名
+	};
+
+	struct Parser {
+		Document doc;
+		string file;
+		vector<string> lines;
+		size_t i = 0;
+		vector<Frame> stack;
+		vector<string> ns;
+		string fence;
+
+		void run();
+		void feed(size_t no, const string& raw);
+		void struct_line(size_t no, const string& raw);
+		void file_line(size_t no, const string& raw);
+		void chunk_line(size_t no, const string& raw);
+		void add_insts(size_t no, const vector<string>& names);
+		void add_lines(size_t no, const string& raw, const vector<string>& names);
+		void close_block(size_t no);
+		void push_ns(const string& prefix, int limit);
+		void pop_ns(int n, size_t no);
+
+		Frame& top() { return stack.back(); }
+		bool in_chunk() const { return !stack.empty() && stack.back().kind == 'c'; }
+		bool in_file() const { return !stack.empty() && stack.back().kind == 'f'; }
+		bool in_dir() const { return !stack.empty() && stack.back().kind == 'd'; }
+	};
+~@
+
+全名怎么拼（`["a","b"]` + `"c"` → `a::b::c`）不在这里，在 `util.cpp` 的 `join_ns`：综合那一篇也要用它。
+
+## 七、结构层
+
+结构层是"不在任何 file 体、也不在 chunk 体"的地方：文档级，或某个 dir 体内。
+
+<< 结构层 >>= @
+	void Parser::struct_line(size_t no, const string& raw) {
+		string ln = strip_comment(raw);
+		string t = trim(ln);
+		if (t.empty()) return;
+
+		if (t == "~@") { close_block(no); return; }
+		int closes = 0;
+		if (only_ns_close(t, closes)) { pop_ns(closes, no); return; }
+
+		// !! a::b:: 开命名空间
+		if (has_prefix(t, "!!")) {
+			string body = trim(t.substr(2));
+			vector<string> segs;
+			string rest;
+			if (!read_ns_prefix(body, segs, rest) || !rest.empty())
+				throw Error(file, no, "命名空间写法不对：!! a::");
+			push_ns(body, 0);   // "a::b::"：末尾那两个冒号由 push_ns 自己丢掉
+			return;
+		}
+
+		// dir X @
+		if (has_prefix(t, "dir ") && t.back() == '@') {
+			string name = trim(t.substr(4, t.size() - 5));
+			DirNode& d = doc.dirs[name];
+			if (d.defined) throw Error(file, no, "dir 重复定义：" + name);
+			d.name = name;
+			d.defined = true;
+			d.src_file = file;
+			d.line = static_cast<int>(no);
+			stack.push_back({'d', name});
+			return;
+		}
+
+		// dir X;
+		if (has_prefix(t, "dir ") && t.back() == ';') {
+			string name = trim(t.substr(4, t.size() - 5));
+			if (!in_dir()) throw Error(file, no, "挂载必须写在某个 dir 体内");
+			doc.dirs[top().name].mounts.push_back({true, name, "", static_cast<int>(no), file});
+			return;
+		}
+
+		// file<type> X @ / file X @
+		if (has_prefix(t, "file") && t.back() == '@') {
+			string name, type;
+			if (!read_file_head(t, name, type, '@')) throw Error(file, no, "file 写法不对");
+			string key = file_key(name, type);
+			FileNode& f = doc.files[key];
+			if (f.defined) throw Error(file, no, "file 重复定义：" + name);
+			f.name = name;
+			f.type = type;
+			f.defined = true;
+			f.src_file = file;
+			f.line = static_cast<int>(no);
+			stack.push_back({'f', key});
+			return;
+		}
+
+		// file<type> X;
+		if (has_prefix(t, "file") && t.back() == ';') {
+			string name, type;
+			if (!read_file_head(t, name, type, ';')) throw Error(file, no, "file 写法不对");
+			if (!in_dir()) throw Error(file, no, "挂载必须写在某个 dir 体内");
+			if (!type.empty()) suffix_of(type);
+			doc.dirs[top().name].mounts.push_back({false, name, type, static_cast<int>(no), file});
+			return;
+		}
+
+		// << X >>= @
+		string name;
+		if (chunk_head(t, name)) {
+			if (in_file()) throw Error(file, no, "file 体内不能定义 chunk");
+			string full = has_sep(name) ? name : join_ns(ns, name);
+			if (doc.index.count(full)) throw Error(file, no, "chunk 重复实现：" + full);
+			size_t idx = doc.chunks.size();
+			Chunk c;
+			c.name = full;
+			c.src_file = file;
+			c.line = static_cast<int>(no);
+			doc.chunks.push_back(c);
+			doc.index[full] = idx;
+			stack.push_back({'c', full});
+			return;
+		}
+
+		// 其余是散文
+	}
+~@
+
+`read_file_head` 与 `has_sep` 是两个小工具，单独一块：
+
+<< 结构层的小工具 >>= @
+	bool has_sep(const string& name) { return name.find("::") != string::npos; }
+
+	// file<type> 名字 @|;   类型可省。
+	bool read_file_head(const string& t, string& name, string& type, char end) {
+		size_t i = 4;   // 跳过 "file"
+		if (i < t.size() && t[i] == '<') {
+			size_t e = t.find('>', i);
+			if (e == string::npos) return false;
+			type = t.substr(i + 1, e - i - 1);
+			i = e + 1;
+		}
+		string rest = trim(t.substr(i));
+		if (rest.empty() || rest.back() != end) return false;
+		name = trim(rest.substr(0, rest.size() - 1));
+		return !name.empty() && name.find(' ') == string::npos;
+	}
+~@
+
+## 八、file 体
+
+file 体里只允许三样：实例、命名空间引入、空行。别的都是错——产物内容属于 chunk，不属于接线。
+
+<< file 体 >>= @
+	void Parser::file_line(size_t no, const string& raw) {
+		string t = trim(strip_comment(raw));
+		if (t.empty()) return;
+		if (t == "~@") { close_block(no); return; }
+
+		int closes = 0;
+		if (only_ns_close(t, closes)) { pop_ns(closes, no); return; }
+
+		vector<string> segs;
+		string rest;
+		if (read_ns_prefix(t, segs, rest)) {
+			// 只有"剩下是空或实例"才算引入
+			string probe = rest;
+			int tail = take_ns_close(probe);
+			vector<string> names;
+			if (trim(probe).empty() || inst_line(trim(probe), names)) {
+				push_ns(t.substr(0, t.size() - rest.size()), 0);
+				if (tail) pop_ns(tail, no);
+				if (!trim(probe).empty()) add_insts(no, names);
+				return;
+			}
+		}
+
+		vector<string> names;
+		if (!inst_line(t, names)) throw Error(file, no, "file 体内只能是 chunk 实例：" + t);
+		add_insts(no, names);
+	}
+
+	void Parser::add_insts(size_t no, const vector<string>& names) {
+		for (const auto& nm : names) {
+			Inst in;
+			in.name = nm;
+			in.ns = ns;
+			in.file = file;
+			in.line = static_cast<int>(no);
+			doc.files[top().name].body.push_back(in);
+		}
+	}
+~@
+
+## 九、chunk 体
+
+chunk 体不剥注释（块内是代码），只有围栏例外。
+
+<< chunk 体 >>= @
+	void Parser::chunk_line(size_t no, const string& raw) {
+		string t = trim(raw);
+		if (t == "~@") { close_block(no); return; }
+
+		Chunk& c = doc.chunks[doc.index[top().name]];
+
+		int closes = 0;
+		if (only_ns_close(t, closes)) {
+			pop_ns(closes, no);
+			c.lines.push_back(Line{Line::Code, "", "", "", {}, static_cast<int>(no)});
+			return;
+		}
+
+		vector<string> segs;
+		string rest;
+		if (read_ns_prefix(t, segs, rest)) {
+			string probe = rest;
+			int tail = take_ns_close(probe);
+			vector<string> names;
+			if (trim(probe).empty() || inst_line(trim(probe), names)) {
+				push_ns(t.substr(0, t.size() - rest.size()), 0);
+				if (!trim(probe).empty()) add_lines(no, raw, names);
+				if (tail) pop_ns(tail, no);
+				return;
+			}
+		}
+
+		vector<string> names;
+		if (inst_line(t, names)) {
+			add_lines(no, raw, names);
+			return;
+		}
+		string cn;
+		if (chunk_head(t, cn)) throw Error(file, no, "chunk 体内不能再定义 chunk");
+		c.lines.push_back(Line{Line::Code, rtrim(raw), "", "", {}, static_cast<int>(no)});
+	}
+
+	void Parser::add_lines(size_t no, const string& raw, const vector<string>& names) {
+		Chunk& c = doc.chunks[doc.index[top().name]];
+		string indent = raw.substr(0, leading_ws(raw));
+		for (const auto& nm : names) {
+			Line ln;
+			ln.kind = Line::Inst;
+			ln.name = nm;
+			ln.indent = indent;
+			ln.ns = ns;
+			ln.no = static_cast<int>(no);
+			c.lines.push_back(ln);
+		}
+	}
+~@
+
+## 十、剥缩进
+
+最小公共缩进：代码行与字面行按行首空白算，实例行按自己的缩进算。三者一起找出最小值，然后一起剥。
+
+实例行参与计算是必须的：一个体如果只由实例组成，不参与就永远剥不掉外层排版缩进，产物里会多一层 tab。
+
+<< 剥缩进 >>= @
+	void dedent(Chunk& c) {
+		auto& ls = c.lines;
+		while (!ls.empty() && ls.front().kind == Line::Code && is_blank(ls.front().text)) ls.erase(ls.begin());
+		while (!ls.empty() && ls.back().kind == Line::Code && is_blank(ls.back().text)) ls.pop_back();
+
+		int m = -1;
+		for (const auto& ln : ls) {
+			int w = (ln.kind == Line::Inst) ? static_cast<int>(ln.indent.size())
+			                                : (is_blank(ln.text) ? -1 : leading_ws(ln.text));
+			if (w < 0) continue;
+			if (m < 0 || w < m) m = w;
+		}
+		if (m <= 0) {
+			for (auto& ln : ls) if (ln.kind == Line::Code) ln.text = rtrim(ln.text);
+			return;
+		}
+		for (auto& ln : ls) {
+			if (ln.kind == Line::Inst) {
+				ln.indent = static_cast<int>(ln.indent.size()) >= m ? ln.indent.substr(m) : "";
+				continue;
+			}
+			ln.text = static_cast<int>(ln.text.size()) >= m ? rtrim(ln.text.substr(m)) : "";
+		}
+	}
+~@
+
+## 十一、入栈出栈
+
+<< 入栈出栈 >>= @
+	// prefix 可能是 "a::"、"a::b::"，也可能是 "a::b"：两头都认，末尾的 :: 当作"到此为止"。
+	// 不借用 read_ns_prefix：那个函数要的是"前缀之后还有内容"，而这里前缀本身就到头了。
+	void Parser::push_ns(const string& prefix, int) {
+		size_t i = 0;
+		while (i < prefix.size()) {
+			size_t e = prefix.find("::", i);
+			string seg = prefix.substr(i, (e == string::npos ? prefix.size() : e) - i);
+			if (!seg.empty()) {
+				ns.push_back(seg);
+				doc.namespaces.insert(join_ns(ns, ""));
+			}
+			if (e == string::npos) break;
+			i = e + 2;
+		}
+	}
+
+	void Parser::pop_ns(int n, size_t no) {
+		if (n > static_cast<int>(ns.size())) throw Error(file, no, "~:: 没有对应的开层");
+		ns.resize(ns.size() - n);
+	}
+
+	void Parser::close_block(size_t no) {
+		if (stack.empty()) throw Error(file, no, "~@ 没有对应的开层");
+		Frame f = stack.back();
+		stack.pop_back();
+		if (f.kind == 'c') {
+			Chunk& c = doc.chunks[doc.index[f.name]];
+			// 结束行号只对 weave 有用：它据此知道"这块吃到第几行，之后回到散文"。
+			c.end_line = static_cast<int>(no);
+			// 体首行 @todo
+			if (!c.lines.empty() && c.lines[0].kind == Line::Code) {
+				string t = trim(c.lines[0].text);
+				if (t == "@todo" || t == "@todo:") { c.todo = true; c.lines.erase(c.lines.begin()); }
+			}
+			dedent(c);
+		} else if (f.kind == 'f') {
+			doc.files[f.name].end_line = static_cast<int>(no);
+		} else {
+			doc.dirs[f.name].end_line = static_cast<int>(no);
+		}
+	}
+~@
+
+`push_ns` 为什么不复用 `read_ns_prefix`：那个函数判断"读到了几段"靠的是**前缀后面还有东西**（`x:: <<a>>` 里的 `<<a>>`），而 `!! a::b::` 里前缀本身就顶到行尾。早先借它时补过一个字符（`prefix + "x"`），结果最后一段永远读不出来——`!!` 悄悄开了零层，直到某篇附录第一次用它才炸。两个函数对"边界"的定义不同，就不该互相借。
+
+`close_block` 里记下 `end_line` 是解析器替 weave 做的一件事。综合不需要它——`~@` 对 tangle 只是"体到此为止"；展开需要它，因为那一页要把散文与块按原文顺序交错排出来，必须知道"这块吃到第几行，之后回到散文"。剥缩进会顺手删掉体首尾的空行，所以不能靠行号集合反推范围，只能记这个显式的结束标记。
+
+## 十二、入口
+
+<< 入口 >>= @
+	void Parser::run() {
+		while (i < lines.size()) {
+			feed(i + 1, lines[i]);
+			++i;
+		}
+		if (!stack.empty()) throw Error(file, 0, "有块没有闭合");
+		if (!ns.empty()) throw Error(file, 0, "有命名空间没有闭合：" + join_ns(ns, ""));
+	}
+
+	void Parser::feed(size_t no, const string& raw) {
+		// 围栏：整段字面
+		if (!fence.empty()) {
+			if (fence_close(raw, fence)) { fence.clear(); return; }
+			if (in_chunk()) {
+				Chunk& c = doc.chunks[doc.index[top().name]];
+				c.lines.push_back(Line{Line::Lit, rtrim(raw), "", "", {}, static_cast<int>(no)});
+			}
+			return;
+		}
+		string run;
+		if (!in_file() && fence_open(raw, run)) { fence = run; return; }
+
+		if (in_chunk()) chunk_line(no, raw);
+		else if (in_file()) file_line(no, raw);
+		else struct_line(no, raw);
+	}
+
+	}  // namespace
+
+	Document parse(const string& src, const string& file) {
+		Parser p;
+		p.file = file;
+		p.lines = split_lines(src);
+		p.doc.main_file = file;
+		try {
+			p.run();
+		} catch (Error& e) {
+			if (e.file.empty()) e.file = file;
+			throw;
+		}
+		return std::move(p.doc);
+	}
+~@
+
+## 十三、合并多篇
+
+一本书拆成多篇，每篇独立解析（行号、命名空间都不跨篇），最后把表和树并起来。
+
+并的规则只有一条：**同一个名字在两篇里都出现，就是错**。v2 允许"占位接真定义"，v3 没有占位，所以重名必须报。
+
+<< 合并多篇 >>= @
+	Document merge(vector<Document> docs) {
+		Document out;
+		for (auto& d : docs) {
+			if (out.main_file.empty()) out.main_file = d.main_file;
+			for (auto& c : d.chunks) {
+				if (out.index.count(c.name))
+					throw Error(c.src_file, c.line, "chunk 在两篇里都实现了：" + c.name);
+				out.index[c.name] = out.chunks.size();
+				out.chunks.push_back(c);
+			}
+			for (auto& kv : d.dirs) {
+				DirNode& slot = out.dirs[kv.first];
+				if (slot.defined && kv.second.defined)
+					throw Error(d.main_file, kv.second.line, "dir 在两篇里都定义了：" + kv.first);
+				if (kv.second.defined) slot = kv.second;
+			}
+			for (auto& kv : d.files) {
+				FileNode& slot = out.files[kv.first];
+				if (slot.defined && kv.second.defined)
+					throw Error(d.main_file, kv.second.line, "file 在两篇里都定义了：" + kv.first);
+				if (kv.second.defined) slot = kv.second;
+			}
+			out.namespaces.insert(d.namespaces.begin(), d.namespaces.end());
+		}
+		return out;
+	}
+
+	}  // namespace nw
+~@

@@ -1,0 +1,242 @@
+# 数据模型
+
+这一篇产 `tangle/nw.hpp`：整个程序的边界。先定类型，再谈实现。
+
+v2 的头文件里，`Chunk` 记了十一个字段：名字、路径、体、逐行来源、来源文件、行号、顺序声明（两个）、是否赋值、是否待办、是否在别人体内。
+
+v3 只剩五样，另加一样 v2 没有的：**结束行号**。少掉的不是优化，是**那些字段本来就不属于 chunk**：
+
+| 少了什么 | 为什么 |
+|---|---|
+| `path` | 位置由 `file` 的接线决定，chunk 不知道自己属于哪个产物 |
+| `after` / `before` | 顺序就是接线顺序，没有第二种排序 |
+| `defined` | 没有"只声明"这个状态，有定义才有名字 |
+| `inside` | 没有子块，定义永远在文档层 |
+
+添上的那一样归 weave：它要按原文顺序把散文与块交错排出来，就得知道每一块吃到哪一行。**`~@` 对综合只是"体到此为止"，对展开才是"这里回到散文"**——同一个标记，两种读者各取一面。
+
+## 一、接线
+
+一个文件的内容就是一串实例。
+
+file<hpp> nw @
+	<< 边界 >>
+	<< Line 与 Chunk >>
+	<< 树 >>
+	<< 错误 >>
+	<< 接口 >>
+	<< 收尾 >>
+~@
+
+接线的顺序就是产物里的顺序。想改顺序，改这六行，不碰任何 chunk。
+
+## 二、边界
+
+头文件自己包含所需的标准库，不指望别人先 include。
+
+<< 边界 >>= @
+	// 头文件是模块边界：只有类型与声明，没有一行实现。
+	#ifndef NEOWEB_NW_H
+	#define NEOWEB_NW_H
+
+	#include <cctype>      // isalnum：weave 生成锚点用
+	#include <cstdio>      // std::to_string 之外的零散用途
+	#include <filesystem>  // 建目录、拼路径
+	#include <fstream>     // 整文件读写
+	#include <iostream>    // usage 与错误输出
+	#include <map>
+	#include <set>
+	#include <sstream>
+	#include <string>
+	#include <vector>
+
+	// 全部实现放进命名空间，只为了让文件末尾的 main 保持三行。
+	using std::map;
+	using std::set;
+	using std::string;
+	using std::vector;
+
+	namespace nw {
+~@
+
+## 三、chunk 的体里有两种行
+
+这是 v3 与 v2 在类型上最实质的差别：chunk 的体不再是"纯文本行"，而是**代码行与实例行的混合**。
+
+v2 靠字符串前缀（`\x01`、`\x02`）在文本里打标记，展开时再猜。v3 把它变成类型：
+
+<< Line 与 Chunk >>= @
+	// 体里的一行：代码、字面（围栏内）、或者一次实例化。
+	// 三者用枚举分开，展开时不必猜前缀。
+	struct Line {
+		enum Kind { Code, Lit, Inst } kind = Code;
+		string text;          // Code / Lit 的内容
+		string name;          // Inst：<< >> 里的名字
+		string indent;        // Inst：行首缩进，展开时叠加
+		vector<string> ns;    // Inst：这一行所在命名空间（解析时定下）
+		int no = 0;           // 来自源文件第几行（--debug 的 #line 用）
+	};
+
+	// 一个 chunk 只有名字和内容。位置不在这里。
+	struct Chunk {
+		string name;          // 全名：命名空间段用 :: 连接
+		vector<Line> lines;
+		string src_file;      // 写在哪个 .nw 里
+		int line = 0;         // 块头行号
+		int end_line = 0;     // ~@ 所在行号：weave 靠它跳过定义区
+		bool todo = false;    // 体首行 @todo：还没写完
+	};
+~@
+
+`ns` 记在实例行上而不是 chunk 上，因为同一个 chunk 里可以有 `x:: … ~::` 把后续行切到别的命名空间。名字解析发生在**写下的位置**，不是定义的位置。
+
+## 四、树：dir、file、mount
+
+树只有两种节点和一个挂载记录。
+
+<< 树 >>= @
+	// 一次实例化：把某个 chunk 贴到这里。
+	struct Inst {
+		string name;      // 写在 << >> 里的名字（可能还没加前缀）
+		vector<string> ns; // 解析这一行时的命名空间
+		string file;      // 写在哪个 .nw 里：合并之后报错要用
+		int line = 0;
+	};
+
+	// 一次挂载：某个目录下有一个子目录或一个文件。
+	// 目录与文件在这里是同一种记录，靠 is_dir 分——它们对父目录的要求一样。
+	struct Mount {
+		bool is_dir = false;
+		string name;
+		string type;      // 文件类型；目录为空
+		int line = 0;
+		string file;      // 写在哪个 .nw 里
+	};
+
+	// 一个文件：产物内容 = 实例列表依次展开。
+	struct FileNode {
+		string name;
+		string type;      // 空 = 名字即完整文件名
+		vector<Inst> body;
+		string src_file;  // 写在哪个 .nw 里
+		int line = 0;
+		int end_line = 0; // ~@ 所在行号
+		bool defined = false;
+	};
+
+	// 一个目录：只装挂载，没有内容。
+	struct DirNode {
+		string name;
+		vector<Mount> mounts;
+		string src_file;
+		int line = 0;
+		int end_line = 0;
+		bool defined = false;
+	};
+
+	// 书的目录：来自 book.yaml（menu.nw 的产物）。顺序就是阅读顺序。
+	struct Part {
+		string title;
+		vector<string> files;
+	};
+
+	struct Book {
+		string title;
+		vector<Part> parts;
+		vector<string> order;   // 展平：阅读顺序上的篇路径
+	};
+
+	// 整份文档：一张表 + 一棵树。
+	// 表：全名 → 下标。树：dir 的挂载，file 的接线。
+	struct Document {
+		vector<Chunk> chunks;
+		map<string, size_t> index;
+		map<string, DirNode> dirs;
+		map<string, FileNode> files;
+		set<string> namespaces;   // 声明过的命名空间全名
+		string main_file;         // 报错用的主源文件名
+	};
+
+	// files 的键：同名但类型不同是两个文件（x.c 与 x.py）。
+	inline string file_key(const string& name, const string& type) {
+		return name + '\x1f' + type;
+	}
+~@
+
+`files` 用「名字 + 类型」做键，因为 `file<c> util` 与 `file<h> util` 是两个产物。`dirs` 只用名字：两个同名目录没法共存于同一父目录，全局唯一更省事。
+
+`Inst` 与 `Mount` 各带一个 `file`，而 `Line` 不带：一行代码永远属于唯一一个 chunk，chunk 自己记着来源；实例与挂载不属于任何 chunk，合书之后光有行号不知道去哪个文件里找。
+
+文件与目录也记着 `src_file` 与 `end_line`，理由与 chunk 相同：weave 要把它们按原文顺序摆回散文之间。它们和 chunk 一样，只知道自己**写在哪**，不知道自己在产物里的位置——那个位置由父目录的挂载决定。
+
+## 五、错误只要三样
+
+<< 错误 >>= @
+	// 错误只带三样：哪个文件、第几行、什么错。
+	struct Error {
+		string file;
+		int line = 0;   // 0 表示没有行号
+		string msg;
+
+		Error(string f, int l, string m) : file(std::move(f)), line(l), msg(std::move(m)) {}
+
+		// 编辑器能点开的格式：file:12: 什么错
+		string where() const {
+			if (line > 0) return file + ":" + std::to_string(line) + ": " + msg;
+			return file + ": " + msg;
+		}
+	};
+~@
+
+## 六、接口
+
+声明按阶段排：工具、解析、综合、展开、站点、命令行。顺序就是调用顺序。
+
+<< 接口 >>= @
+	// ---- 文本工具（util.cpp）----
+	string rtrim(const string& s);
+	string trim(const string& s);
+	bool has_prefix(const string& s, const string& p);
+	bool is_blank(const string& s);
+	int leading_ws(const string& s);
+	vector<string> split_lines(const string& src);
+	string join_lines(const vector<string>& lines);
+	string join_ns(const vector<string>& segs, const string& name);
+	string html_escape(const string& s);
+	string read_file(const string& path);
+	void write_file(const string& path, const string& text);
+	string suffix_of(const string& type);
+
+	// ---- 解析（parse.cpp）----
+	Document parse(const string& src, const string& file);
+	Document merge(vector<Document> docs);
+
+	// ---- 综合（tangle.cpp）----
+	// 带 file/at_line：解析失败时要指回"写错的那一行"，而名字本身不知道自己写在哪。
+	size_t resolve(const Document& doc, const string& name, const vector<string>& ns,
+	               const string& file, int at_line);
+	string file_text(const Document& doc, const FileNode& f, bool line_mode);
+	int tangle(const Document& doc, const string& outdir, bool line_mode);
+
+	// ---- 展开（weave.cpp）----
+	// 目录先读进来：展开要用它算前后章与左栏，不必自己再猜一遍顺序。
+	Book read_book(const string& path);
+	// 一页 = 一份源。doc 里有全部篇的块，这里只取 src 那一篇。
+	string page_html(const Document& doc, const Book& book, const string& src);
+	int weave(const Document& doc, const Book& book, const string& outdir);
+
+	// ---- 站点（serve.cpp）----
+	// root 是已经铺好的那本 HTML；serve 不改一个字节。
+	int serve(const string& root, int port);
+
+	// ---- 命令行（main.cpp）----
+	int run(int argc, char** argv);
+~@
+
+## 七、收尾
+
+<< 收尾 >>= @
+	}  // namespace nw
+
+	#endif  // NEOWEB_NW_H
+~@

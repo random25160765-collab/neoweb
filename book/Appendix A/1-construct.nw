@@ -1,0 +1,140 @@
+# 构建
+
+工具能跑了，接着要问：它怎么被构建出来，以及"构建它所需的东西"凭什么相信。
+
+这些放附录，不是因为次要，而是因为它们**服务于主线而不构成主线**：读这本书是为了理解工具，不是为了学怎么调 Makefile。但反过来说，基础设施写不清楚的项目，主线也活不过第一次换机器。
+
+构建脚本也是代码。它比源码更容易被当成"不用解释的管道"——而它恰恰是别人接手时第一个要读、也最容易读错的东西：`$@` 指什么、为什么某个目标是 phony、`$$` 为什么要写两个。这些不解释，等于把理解成本转嫁给读者。
+
+## 一、接线
+
+file Makefile @
+	<< 构建 >>
+~@
+
+它落在仓库根目录，因为骨架篇在 `top` 里挂了一行 `file Makefile;`——而 `top` 就是 `-o` 指的那个目录。定义在附录、挂载在骨架：这一处也照 v3 的规矩办，位置由挂载决定，内容由定义决定。
+
+## 二、根 Makefile 也是产物
+
+这是整个仓库里唯一有争议的一个决定：**连构建规则都由书展开**。
+
+不做成产物的理由是自举悖论：`make` 要先有 `Makefile` 才能跑。做成产物的理由是**一份真相**：手写一份、书里再贴一份，两份迟早各走各的——而构建脚本的分歧不会报错，它只会让某台机器上的产物和别人不一样。
+
+我们选后者，代价是承认破点不在 `Makefile` 里：
+
+```
+# 第一次：还没有 Makefile，用破点展开一次
+find book -name '*.nw' -exec python3 nw3.py tangle -o . {} +
+
+# 此后
+make
+```
+
+一条命令，代价就付清了。往后每次改构建规则，改的是这一篇，`make` 会自己重铺 `Makefile`。
+
+这里不能写成 `$(find book -name '*.nw')`：命令替换的结果会被 shell 按空格切开，而本书的路径里就有空格（`book/Chapter 1/…`），切开之后破点收到的是半条路径。`-exec … {} +` 让 `find` 自己把文件交出去，不经过 shell 的分词；`-print0 | xargs -0` 也行，但多一节管道，还多一个"这台机器有没有 `xargs`"的假设。
+
+**产物里没有一行注释提醒"这是生成的"。** 那种注释会跟着产物跑到别人的机器上（装好的二进制、发出去的包），而它想说的两件事——"真相在别处"、"别手改"——都是这本书要读者从结构里读出来的，不是靠一句标语。
+
+## 三、破点：一个只做 tangle 的 Python 实现
+
+`nw3.py` 是这本书的第二个实现，只做 `tangle`：读 `.nw`、并表、铺盘。它不 weave、不 serve，也不打算长成第二个完整的工具。
+
+它存在的理由只有一个：**第一次**。当 `tangle/` 还是空的时候，得有个东西能读 `.nw`。之后它就是 `make check` 与 `crosscheck` 的裁判。
+
+这条边界必须守住，否则会滑成"两个实现各发展一半"：破点每多一个功能，`crosscheck` 能发现的偏差就少一处。
+
+## 四、自举：同一条依赖，两种满足方式
+
+`tangle/*.cpp` 是 `.nw` 的产物，但生成它们需要一个能读 `.nw` 的程序。第一次没有这个程序，只能由破点顶上；之后所有 `.nw` 都交给 `nw` 自己。
+
+规则里那句 `if [ -x $(NW) ]` 就是这个判断：**有 `nw` 就用它，没有才退回破点**。它不写在两个目标里，因为那是同一件事的两种走法，写两遍就必然有一遍会腐坏。
+
+一个 `.tangle-stamp` 当作"产物已铺"的记号，而不是给八个产物各写一条依赖：`tangle` 一次铺整棵树，逐个追踪只会让 Makefile 变成第二份目录表。
+
+## 五、crosscheck：两个实现是否还在同一页
+
+```
+make crosscheck
+```
+
+它做的是：用破点重新铺一遍到临时目录，与工作区的 `tangle/` 逐字节比对。
+
+这防的不是"自举失败"——自举失败会当场报错。它防的是**破点悄悄僵化**：语法的某一处改了，`nw` 改了，`nw3.py` 忘了。那时 `make` 依然能过（因为用的是 `nw`），只有下一次从零开始的人会撞上。这种事在自举系统里几乎必然发生一次，所以它得有一条命令守着。
+
+`crosscheck` 通过的那一刻叫**定点**：两个实现对同一份源给出同一棵树。定点不是永久状态，改一次语法就要重新打一次。
+
+**`check` 与 `test` 分工不同。** `make check` 读的是书：重复实现、未实现的引用、挂载冲突——错在源里。`make test` 读的是破点：二十七个小用例，喂给它的都是构造出来的 `.nw` 片段，不碰这本书。前者保证这一版的书自洽，后者保证换台机器时那个 Python 实现还认得出同一套语法。两条都不编译——编译是 `make`。
+
+## 六、篇的路径里有空格
+
+最不体面的一条，必须写下来：`book/Chapter 3/1-types.nw` 里的空格会让 `make` 把一条路径切成两个词，于是它去找一个叫 `book/Chapter` 的目标。
+
+处理办法是把空格转义再交给两边：
+
+<< 构建 >>= @
+	CXX      ?= g++
+	CXXFLAGS ?= -std=c++17 -Wall -Wextra
+	# pkg-config 给出两个库的链接参数。它缺席时整行为空，链接期会报未定义符号——
+	# 那时缺的是库，不是这几行。
+	LIBS     := $(shell pkg-config --libs libcmark-gfm source-highlight 2>/dev/null)
+	# 篇的路径带空格，make 按空白切词：把空格转义，make 与 sh 两边都认这个写法。
+	SRC      := $(shell find book -name '*.nw' | sort | sed 's/ /\\ /g')
+	NW       := ./nw
+	BOOT     := python3 nw3.py
+
+	.PHONY: all check test web serve crosscheck clean
+
+	all: $(NW)
+
+	# 有 nw 就用 nw（自举），没有才退回破点。一次铺整棵树，用一个记号记下。
+	.tangle-stamp: $(SRC) nw3.py
+		@mkdir -p tangle
+		@if [ -x $(NW) ]; then \
+		  echo "  NW    tangle"; $(NW) tangle -o . $(SRC); \
+		else \
+		  echo "  BOOT  nw3.py"; $(BOOT) tangle -o . $(SRC); \
+		fi
+		@touch $@
+
+	$(NW): .tangle-stamp
+		$(CXX) $(CXXFLAGS) -o $@ tangle/*.cpp $(LIBS)
+
+	# 破点也会查：它比 nw 多一条 check，理由在下一篇。
+	check:
+		$(BOOT) check $(SRC)
+
+	test:
+		python3 test_nw3.py
+
+	web: $(NW)
+		@$(NW) weave -b tangle/book.yaml -o weave $(SRC)
+
+	serve: web
+		@$(NW) serve weave
+
+	# 破点与自举的产物逐字节相同：否则"哪一份才是对的"就没人答得上来。
+	crosscheck: $(NW)
+		@rm -rf /tmp/nw-boot
+		@$(BOOT) tangle -o /tmp/nw-boot $(SRC) > /dev/null
+		@diff -r tangle /tmp/nw-boot/tangle && echo "crosscheck ok：破点与自举的产物一致"
+
+	clean:
+		rm -rf tangle weave $(NW) .tangle-stamp /tmp/nw-boot
+~@
+
+`sed 's/ /\\ /g'` 里那两个反斜杠是两个语言两层的事：`sed` 要一个反斜杠，写成 `\\`；而这段文字在 `$(shell …)` 里，交给 sh 之前不经 `make` 的转义。写错一层的表现是路径里多出一个反斜杠，`find` 找不到文件——报错会指向一行看起来完全正确的路径。
+
+**这里没有 `install`**：装到 `PATH` 是每个用的人自己的事，一条 `ln -s` 就够了，把它写进 Makefile 只多一处需要维护的默认值。也没有 `distclean`：`clean` 之后一条命令就能重建全部，再分一档只是把同一个动作起两个名字。
+
+## 七、从零开始
+
+```
+git clone <repo> && cd neoweb
+find book -name '*.nw' -exec python3 nw3.py tangle -o . {} +   # 破点：铺出 Makefile 与源码
+make                                                   # 编译出 ./nw
+make web                                               # 铺出 weave/ 那本书
+make crosscheck                                        # 两个实现是否还一致
+```
+
+第二条之后，破点就退休了。它只在两种时刻出现：**第一次**，和**换了台机器**。

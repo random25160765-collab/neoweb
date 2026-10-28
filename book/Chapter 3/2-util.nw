@@ -1,0 +1,173 @@
+# 文本工具
+
+这一篇产 `tangle/util.cpp`。它与语法无关，换成别的语言也用得上——但解析器离不开它。
+
+## 一、接线
+
+file<cpp> util @
+	<< util 的头 >>
+	<< 去空白 >>
+	<< 前缀与空白 >>
+	<< 切行 >>
+	<< 拼接命名空间 >>
+	<< 转义 >>
+	<< 读写 >>
+	<< 后缀表 >>
+~@
+
+## 二、头
+
+<< util 的头 >>= @
+	#include "nw.hpp"
+
+	namespace nw {
+~@
+
+## 三、去空白
+
+两个方向分开写，因为调用方要的东西不一样：`trim` 两头去，`rtrim` 只去尾——后者用在"保留行首缩进的比较"上。
+
+<< 去空白 >>= @
+	string rtrim(const string& s) {
+		size_t e = s.find_last_not_of(" \t\r\n");
+		return e == string::npos ? string() : s.substr(0, e + 1);
+	}
+
+	string trim(const string& s) {
+		size_t b = s.find_first_not_of(" \t\r\n");
+		if (b == string::npos) return string();
+		size_t e = s.find_last_not_of(" \t\r\n");
+		return s.substr(b, e - b + 1);
+	}
+~@
+
+## 四、前缀与空白
+
+`leading_ws` 数的是字符，不是视觉列。对 C/C++ 没差别；对 Python 有——混用 tab 与空格时剥缩进会错位。这个代价写在语法篇里：体里请统一。
+
+<< 前缀与空白 >>= @
+	bool has_prefix(const string& s, const string& p) {
+		return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
+	}
+
+	bool is_blank(const string& s) {
+		return s.find_first_not_of(" \t\r\n") == string::npos;
+	}
+
+	int leading_ws(const string& s) {
+		int n = 0;
+		for (char c : s) {
+			if (c == ' ' || c == '\t') ++n;
+			else break;
+		}
+		return n;
+	}
+~@
+
+## 五、切行
+
+`\r` 直接丢掉：Windows 换行读进来不该在产物里留一个回车。
+
+<< 切行 >>= @
+	vector<string> split_lines(const string& src) {
+		vector<string> out;
+		string cur;
+		for (char c : src) {
+			if (c == '\n') { out.push_back(cur); cur.clear(); }
+			else if (c != '\r') cur.push_back(c);
+		}
+		if (!cur.empty()) out.push_back(cur);
+		return out;
+	}
+
+	string join_lines(const vector<string>& lines) {
+		string out;
+		for (size_t i = 0; i < lines.size(); ++i) {
+			if (i) out.push_back('\n');
+			out += lines[i];
+		}
+		return out;
+	}
+~@
+
+## 六、拼接命名空间
+
+全名只有一个拼法：段与段之间两个冒号，最后接短名。解析时要拼（把使用处的短名固定成全名），综合时也要拼（查表），所以它不在 `parse.cpp` 里，在这里。
+
+`join_ns(ns, "")` 会留下末尾的 `::`，这不是笔误：那是"命名空间本身的全名"，与 chunk 的全名用同一套拼法，才好在同一张表里比对。
+
+<< 拼接命名空间 >>= @
+	// 命名空间段拼成前缀：["a","b"] + "c" → "a::b::c"
+	string join_ns(const vector<string>& segs, const string& name) {
+		string out;
+		for (const auto& s : segs) { out += s; out += "::"; }
+		out += name;
+		return out;
+	}
+~@
+
+## 七、转义
+
+只转四个字符：`&` 必须第一个处理，否则会把后面生成的 `&lt;` 再转一次。
+
+<< 转义 >>= @
+	string html_escape(const string& s) {
+		string out;
+		for (char c : s) {
+			switch (c) {
+				case '&': out += "&amp;"; break;
+				case '<': out += "&lt;"; break;
+				case '>': out += "&gt;"; break;
+				case '"': out += "&quot;"; break;
+				default: out.push_back(c);
+			}
+		}
+		return out;
+	}
+~@
+
+## 八、读写
+
+写之前建父目录：调用方不该关心"目录存在吗"。
+
+<< 读写 >>= @
+	string read_file(const string& path) {
+		std::ifstream in(path, std::ios::binary);
+		if (!in) throw Error(path, 0, "打不开文件");
+		std::ostringstream ss;
+		ss << in.rdbuf();
+		return ss.str();
+	}
+
+	void write_file(const string& path, const string& text) {
+		std::filesystem::path p(path);
+		if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path());
+		std::ofstream out(path, std::ios::binary);
+		if (!out) throw Error(path, 0, "写不了文件");
+		out << text;
+	}
+~@
+
+## 九、后缀表
+
+类型到后缀的映射。`makefile`、`license` 这类没有后缀，映射到空串——它们靠文件名本身认。
+
+未知类型直接报错，不猜。猜的结果是一个叫 `foo` 的文件，而作者以为会得到 `foo.xyz`。
+
+<< 后缀表 >>= @
+	string suffix_of(const string& type) {
+		static const map<string, string> m = {
+			{"c", ".c"}, {"h", ".h"}, {"cpp", ".cpp"}, {"hpp", ".hpp"}, {"cc", ".cc"},
+			{"py", ".py"}, {"md", ".md"}, {"nw", ".nw"}, {"json", ".json"},
+			{"yaml", ".yaml"}, {"yml", ".yml"}, {"html", ".html"}, {"css", ".css"},
+			{"js", ".js"}, {"ts", ".ts"}, {"sh", ".sh"}, {"txt", ".txt"},
+			{"cu", ".cu"}, {"svg", ".svg"},
+			{"makefile", ""}, {"license", ""}, {"gitignore", ""},
+		};
+		auto it = m.find(type);
+		if (it == m.end()) throw Error("", 0, "未知文件类型：<" + type + ">");
+		return it->second;
+	}
+
+	}  // namespace nw
+~@

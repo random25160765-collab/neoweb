@@ -1,0 +1,235 @@
+# 预览
+
+`weave` 写完盘，页就已经能双击打开了——样式是内联的，链接是相对的，`file://` 下没有一处要联网。那为什么还有 `serve`？
+
+两个理由，都不是"必须"。其一，双击打开会让浏览器把每一页当成一个独立文档：地址栏里是 `file:///…/1-types.html`，刷新一次就是重新读盘，而读者想要的是"一条 URL 走遍全书"。其二，`file://` 下的相对链接在个别浏览器里会跳出沙箱警告，读者第一次看到会以为是这本书的问题——**工具的产物不该让人替它解释环境**。
+
+所以 `serve` 很薄：把一个目录摆到回环地址上，只认 GET。它不改一个字节的 HTML，也不是部署服务器。
+
+## 一、接线
+
+file<cpp> serve @
+	<< serve 的头 >>
+	<< 一次请求 >>
+	<< 路径 >>
+	<< 一次回应 >>
+	<< 一次会话 >>
+	<< 循环 >>
+	<< 本体 >>
+~@
+
+## 二、头
+
+套接字只在这一篇出现。理由与第三方库那条一样：**依赖的范围就是理解的范围**，别的产物不需要知道这本书是怎么被摆出去的。
+
+<< serve 的头 >>= @
+	#include "nw.hpp"
+
+	// 套接字只在这一篇出现：别的产物不需要知道这本书是怎么被摆出去的。
+	#include <netinet/in.h>
+	#include <sys/socket.h>
+	#include <unistd.h>
+
+	#include <cerrno>
+	#include <csignal>
+	#include <cstring>
+
+	namespace nw {
+	namespace {
+
+	// 一次请求只要三样：方法、路径、协议版本。其余的头一律不看。
+	struct Request {
+		string method;
+		string path;
+	};
+~@
+
+`<unistd.h>` 提供 `read` / `write` / `close`，`<sys/socket.h>` 提供 `socket` / `bind` / `listen` / `accept`：**四个系统调用就是一台静态服务器**。引一个 HTTP 库进来，换到的是几十个这一节用不到的字节（keep-alive、分块、压缩、范围请求），代价是构建机上多一个依赖。
+
+## 三、一次请求
+
+浏览器发来的第一行是 `GET /1-types.html HTTP/1.1`。这一行之后的头全是对话双方的事，与这本书无关：没有表单、没有 cookie、没有认证，也就没有要读的头。
+
+<< 一次请求 >>= @
+	// 只读第一行。8 KB 还没换行就不是浏览器：那时断掉连接比读进内存更安全。
+	bool read_request(int fd, Request& r) {
+		string buf;
+		char tmp[1024];
+		while (buf.find("\r\n") == string::npos) {
+			ssize_t n = ::read(fd, tmp, sizeof(tmp));
+			if (n <= 0) return false;
+			buf.append(tmp, static_cast<size_t>(n));
+			if (buf.size() > 8192) return false;
+		}
+		std::istringstream in(buf.substr(0, buf.find("\r\n")));
+		string version;
+		if (!(in >> r.method >> r.path >> version)) return false;
+		return has_prefix(version, "HTTP/");
+	}
+~@
+
+三个判断各有代价，也都付得起：
+
+- **分多次读**。一次 `read` 拿到的不一定是一整行：TCP 只保证字节顺序，不保证边界。循环到 `\r\n` 出现为止，是唯一正确的写法。
+- **不认 keep-alive**。回应里写 `Connection: close`，一次连接一次请求。少了连接复用，换来的是"每段代码只在前一次连接的生命里存在"——没有跨请求的状态，也就没有跨请求的 bug。
+- **协议版本只查前缀**。`HTTP/1.0` 与 `HTTP/1.1` 在这一层没有区别，差别都在我们不发的那几个头里。
+
+## 四、URL 到盘上的路径
+
+<< 路径 >>= @
+	// URL → 盘上的路径。两件事必须做：去掉查询串、挡住 `..`。
+	string path_of(const string& root, const string& url) {
+		string p = url;
+		size_t q = p.find('?');
+		if (q != string::npos) p = p.substr(0, q);
+		if (p.empty() || p == "/") p = "/index.html";
+		if (p.find("..") != string::npos) return string();   // 空串 = 拒绝
+		if (p.back() == '/') p += "index.html";
+		return root + p;
+	}
+
+	string content_type(const string& path) {
+		size_t dot = path.rfind('.');
+		string ext = dot == string::npos ? string() : path.substr(dot);
+		if (ext == ".html" || ext == ".htm") return "text/html; charset=utf-8";
+		if (ext == ".css") return "text/css; charset=utf-8";
+		if (ext == ".js") return "text/javascript; charset=utf-8";
+		if (ext == ".json") return "application/json; charset=utf-8";
+		if (ext == ".svg") return "image/svg+xml";
+		if (ext == ".png") return "image/png";
+		return "application/octet-stream";
+	}
+~@
+
+`..` 一律拒。这一层不是权限系统——它绑在回环地址上，本来就只有本机能看到——但它挡住的是**自己的手误**：一份把 `href` 写成 `../../etc/passwd` 的稿子，应该在浏览器里得到 404，而不是真的把那个文件读出来发过去。判据是"这一串东西永远不该出现在书的链接里"，所以不必先解析再判断，出现即拒。
+
+`charset=utf-8` 写在 `text/*` 上不是讲究：不写它，浏览器会按 locale 猜，中文页在英文系统上就会变成一片方块。
+
+## 五、一次回应
+
+<< 一次回应 >>= @
+	string reason_of(int code) {
+		if (code == 200) return "OK";
+		if (code == 404) return "Not Found";
+		if (code == 405) return "Method Not Allowed";
+		return "Internal Server Error";
+	}
+
+	// write 可能只写一半：循环到写完。丢掉返回值是这类服务器最常见的 bug。
+	bool send_all(int fd, const string& data) {
+		size_t off = 0;
+		while (off < data.size()) {
+			ssize_t n = ::write(fd, data.data() + off, data.size() - off);
+			if (n <= 0) return false;
+			off += static_cast<size_t>(n);
+		}
+		return true;
+	}
+
+	// 状态行 + 两个头 + 空行 + 正文。不发 Date、不发 Server：它们对读者没有意义。
+	void respond(int fd, int code, const string& type, const string& body) {
+		std::ostringstream head;
+		head << "HTTP/1.1 " << code << ' ' << reason_of(code) << "\r\n"
+		     << "Content-Type: " << type << "\r\n"
+		     << "Content-Length: " << body.size() << "\r\n"
+		     << "Connection: close\r\n\r\n";
+		send_all(fd, head.str() + body);
+	}
+~@
+
+`Content-Length` 是必须的，而且必须按**字节**算：`body.size()` 是字节，不是字符。中文页里一个"页"字三字节，按字符算会让浏览器认为正文被截断，于是它一直等——表现是页面白屏，而服务器日志里一切正常。
+
+## 六、一次会话
+
+<< 一次会话 >>= @
+	void handle(int fd, const string& root) {
+		Request r;
+		if (!read_request(fd, r)) return;
+		if (r.method != "GET") {
+			respond(fd, 405, "text/plain; charset=utf-8", "只接受 GET\n");
+			return;
+		}
+		string path = path_of(root, r.path);
+		string body, type = "text/plain; charset=utf-8";
+		int code = 200;
+		try {
+			if (path.empty())
+				body = "路径里有 ..：不提供\n", code = 404;
+			else if (!std::filesystem::is_regular_file(path))
+				body = "没有这一页：" + r.path + "\n", code = 404;
+			else
+				body = read_file(path), type = content_type(path);
+		} catch (Error&) {
+			code = 500;
+			body = "读不出来：" + path + "\n";
+		}
+		// 一行一条，立刻刷出去：日志重定向到文件时 std::cout 是全缓冲的，
+		// 不刷就只在退出时一次性出现——而这条服务是"退出时才看日志"用不上的东西。
+		std::cout << r.method << ' ' << r.path << ' ' << code << '\n' << std::flush;
+		respond(fd, code, type, body);
+	}
+~@
+
+`read_file` 会抛，所以这里包一层：一个坏掉的符号链接不该让整台服务器退出。这和服务端软件里"捕获一切"的坏习惯不同——**它的边界是本次请求**，一次会话的失败不该影响下一次。
+
+请求日志打的是状态码，不是耗时。耗时要靠统计，统计要先有采样和基线；而这里的读者是一个人，他要知道的是"我点的那一页到底有没有被找到"。
+
+## 七、循环
+
+<< 循环 >>= @
+	// 一个接一个地处理。这本书是三十页静态文件，并发在这件事上没有意义。
+	void loop_forever(int fd, const string& root) {
+		for (;;) {
+			int c = ::accept(fd, nullptr, nullptr);
+			if (c < 0) continue;   // EINTR 与惊群：跳过这一次，不结束服务
+			handle(c, root);
+			::close(c);
+		}
+	}
+~@
+
+单线程不是省事，是**唯一说得清的语义**：状态只有"当前这一次请求"，所以不存在两个请求看见彼此的中间状态。换成线程池，第一件要引入的东西不是线程，而是"什么可以共享"的规则——而这里没有任何东西需要共享。
+
+代价写在明处：一个客户端慢慢发请求，会把后面的人都挡住。预览场景里客户端只有一个人，这个代价为零。
+
+## 八、本体
+
+<< 本体 >>= @
+	}  // namespace
+
+	int serve(const string& root_in, int port) {
+		string root = root_in;
+		while (root.size() > 1 && root.back() == '/') root.pop_back();
+		if (!std::filesystem::is_directory(root))
+			throw Error("nw", 0, "没有这个目录：" + root);
+
+		// 对端先断开时 write 会触发 SIGPIPE：默认动作是杀进程，这里改成忽略。
+		std::signal(SIGPIPE, SIG_IGN);
+
+		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+		if (fd < 0) throw Error("nw", 0, string("开不了套接字：") + std::strerror(errno));
+		int on = 1;
+		::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+
+		sockaddr_in addr{};
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);   // 只绑回环：预览是本机的事
+		addr.sin_port = htons(static_cast<uint16_t>(port));
+		if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0)
+			throw Error("nw", 0, "端口 " + std::to_string(port) + " 绑不上：" + std::strerror(errno));
+		if (::listen(fd, 16) < 0)
+			throw Error("nw", 0, string("listen 失败：") + std::strerror(errno));
+
+		std::cout << "http://127.0.0.1:" << port << "/ （Ctrl-C 结束）\n" << std::flush;
+		loop_forever(fd, root);
+		return 0;   // 到不了：上面那个循环只有信号能结束它
+	}
+
+	}  // namespace nw
+~@
+
+`SO_REUSEADDR` 是为了**重跑**：上一次按 Ctrl-C 之后，端口会留在 `TIME_WAIT` 里几十秒；没有它，读者会看到"端口绑不上"，然后以为是这个工具坏了。
+
+绑 `INADDR_LOOPBACK` 而不是 `INADDR_ANY` 是一条安全默认：`INADDR_ANY` 会把整台机器的网卡都摆出去，而预览只需要自己看。要让同一局域网里的别人也看，正确的做法是先意识到自己在做什么，而不是让默认值替人决定。
+
+那条地址由 `serve` 打印，不由调用方打印：只有这里知道 bind 有没有成功。

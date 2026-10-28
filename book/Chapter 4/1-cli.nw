@@ -1,0 +1,230 @@
+# 入口
+
+这一篇产 `tangle/main.cpp`：把三个阶段接成一条命令。
+
+命令行只做三件事：**认参数**、**分派**、**决定退出码**。它不解析 `.nw`、不展开、不写盘——那些都在别的篇里。它负责的是另一件事：人敲下去之后，工具不能沉默。
+
+三条命令：`tangle` 给编译器，`weave` 给读者，`serve` 把后者的产物摆到浏览器里。三者共享同一份源，出口不同。这一篇把三条都接上。
+
+## 一、接线
+
+file<cpp> main @
+	<< main 的头 >>
+	<< 用法 >>
+	<< 参数 >>
+	<< 分派 >>
+	<< run 本体 >>
+	<< main 的尾 >>
+~@
+
+## 二、头
+
+<< main 的头 >>= @
+	#include "nw.hpp"
+
+	namespace nw {
+	namespace {
+~@
+
+`usage`、`read_args`、`cmd_tangle` 三个只在文件内用，放匿名命名空间；`run` 是公开的，`nw.hpp` 里有声明。
+
+## 三、用法：写给敲错的人
+
+用法串是整个工具里最容易被读到的一段文档——读者不是从头读的，是在敲错之后读的。所以它只回答两个问题：**命令长什么样**、**每个开关改变什么**。
+
+不写"更多信息见别处"。用法串把人推去另一个地方找答案，等于承认它自己说不清。
+
+三条命令的用法写在同一个串里，不按命令分片输出：读者敲错时想看到的是全貌，而不是"你敲的这一条怎么用"。开关各归各行，读的人自己挑。
+
+<< 用法 >>= @
+	// 用法串只回答两个问题：命令长什么样、每个开关改变什么。
+	const char* usage() {
+		return "用法：\n"
+		       "  nw tangle [-o 目录] [-d|--debug] 篇...\n"
+		       "  nw weave  [-o 目录] [-b 目录文件] 篇...\n"
+		       "  nw serve  [-p 端口] [目录]\n"
+		       "\n"
+		       "  -o 目录      产物写到哪里（默认当前目录）\n"
+		       "  -d, --debug  产物里插 #line，让编译错误指回 .nw\n"
+		       "  -b 文件      书的目录，由 menu 篇展开而来（默认 tangle/book.yaml）\n"
+		       "  -p 端口      服务端口（默认 8080）\n";
+	}
+~@
+
+`--debug` 这一行的意思是"多写一些只有调试时才想要的标记"，具体是什么在综合那一篇：断了才插的 `#line`。用法串不解释机制，只交代开关的后果。
+
+`-b` 与 `-o` 是一对，但方向相反：`-o` 说产物去哪，`-b` 说输入从哪来。`weave` 既写页又读目录，两个都得有，所以它在三条命令里是参数最多的那条——这是它真正的形状，不该靠默认值藏起来。
+
+## 四、参数：手写一遍就够
+
+不做 getopt。两个开关撑不起一个库依赖，更要紧的是语汇：getopt 报的是 `invalid option -- 'x'`，这条工具的中文提示会被它割成两半，一半中文一半英文。
+
+规则四条：
+
+- `-o`、`-b`、`-p` 各吃掉下一个词；
+- `-d` / `--debug` 是开关；
+- 其余以 `-` 开头的**报错**，不当文件。把 `-x` 当文件名读，报错会变成"打不开文件 -x"，把错怪到文件系统头上；
+- 其余都是输入（篇路径，或 `serve` 的目录）。
+
+<< 参数 >>= @
+	struct Options {
+		string command;
+		string outdir = ".";
+		string book = "tangle/book.yaml";
+		int port = 8080;
+		bool debug = false;
+		vector<string> files;
+	};
+
+	bool is_help(const string& cmd) {
+		return cmd == "-h" || cmd == "--help" || cmd == "help";
+	}
+
+	// 手写解析：四个开关、三个取值，撑不起一个 getopt 依赖。
+	Options read_args(int argc, char** argv) {
+		if (argc < 2) throw Error("nw", 0, "缺少子命令");
+		Options o;
+		o.command = argv[1];
+		if (is_help(o.command)) return o;
+		for (int i = 2; i < argc; ++i) {
+			string a = argv[i];
+			if (a == "-o" || a == "--out") {
+				if (i + 1 >= argc) throw Error("nw", 0, "-o 后面要跟一个目录");
+				o.outdir = argv[++i];
+			} else if (a == "-b" || a == "--book") {
+				if (i + 1 >= argc) throw Error("nw", 0, "-b 后面要跟一个文件");
+				o.book = argv[++i];
+			} else if (a == "-p" || a == "--port") {
+				if (i + 1 >= argc) throw Error("nw", 0, "-p 后面要跟一个端口");
+				string v = argv[++i];
+				int p = 0;
+				for (char c : v) {
+					if (!std::isdigit(static_cast<unsigned char>(c)))
+						throw Error("nw", 0, "端口不是数字：" + v);
+					p = p * 10 + (c - '0');
+				}
+				if (p <= 0 || p > 65535) throw Error("nw", 0, "端口超出范围：" + v);
+				o.port = p;
+			} else if (a == "-d" || a == "--debug") {
+				o.debug = true;
+			} else if (!a.empty() && a[0] == '-') {
+				throw Error("nw", 0, "不认识的开关：" + a);
+			} else {
+				o.files.push_back(a);
+			}
+		}
+		return o;
+	}
+~@
+
+端口在这里就地校验，不留给 `bind`：`-p 大` 交给系统调用，报出来的是 `getaddrinfo` 与 `errno` 的英文，读者得先知道 `EAI_SERVICE` 是什么才能改对那一行。三个数字字符就能问清的事，不该拖到三十行之后。
+
+参数层只负责拆词，**不判断哪条命令需要什么**。"必须有输入文件"是 `tangle` 的要求，就由 `tangle` 自己说——放在这里，`nw 打错字` 会先报"没有输入文件"，把真正的问题盖掉。
+
+报错里的文件名写的是 `nw`，不是空串：`where()` 拼出来就是 `nw: 缺少子命令`，与系统里任何一条命令同一个口吻。空串会拼出一个以冒号开头的怪句子，读者第一眼看到的是标点。
+
+## 五、分派：三条命令，三个退出码
+
+三条命令的分派都只有四步：读全部篇、并成一份文档、调对应的阶段、报一句数量。`tangle` 与 `weave` 前两步完全一样——同一份源，两个出口。
+
+**传进来的顺序就是并表的顺序**，所以篇的先后由调用方决定，不写死在书里。写死在书里的顺序，第二次调整就没人记得它藏哪了；而调用方那边是构建脚本，顺序本来就摆在那儿。
+
+<< 分派 >>= @
+	// 三条命令共用前两步：读全部篇、并成一份文档。
+	Document load(const Options& o) {
+		vector<Document> docs;
+		for (const auto& path : o.files) docs.push_back(parse(read_file(path), path));
+		return merge(std::move(docs));
+	}
+
+	int cmd_tangle(const Options& o) {
+		if (o.files.empty()) throw Error("nw", 0, "tangle 没有输入文件");
+		Document doc = load(o);
+		int n = tangle(doc, o.outdir, o.debug);
+		std::cout << "写出 " << n << " 个文件\n";
+		return 0;
+	}
+
+	// weave 多读一样东西：书的目录。它不进 Document——那是源里的结构，
+	// 目录是另一份产物（menu 篇展开出来的 book.yaml）。
+	int cmd_weave(const Options& o) {
+		if (o.files.empty()) throw Error("nw", 0, "weave 没有输入文件");
+		Document doc = load(o);
+		Book book = read_book(o.book);
+		int n = weave(doc, book, o.outdir);
+		std::cout << "写出 " << n << " 页\n";
+		return 0;
+	}
+
+	// serve 不碰源：它只把已经铺好的一堆 HTML 摆出去。
+	// 地址由 serve 自己打印——只有它知道 bind 有没有成功。
+	int cmd_serve(const Options& o) {
+		string root = o.files.empty() ? string("weave") : o.files.front();
+		if (o.files.size() > 1) throw Error("nw", 0, "serve 只接一个目录");
+		return serve(root, o.port);
+	}
+
+	}  // namespace
+~@
+
+匿名命名空间的口子在这里关上。下一个函数是 `run`，它要在 `nw.hpp` 里被声明、被 `main` 调用——包在匿名命名空间里就成了内部链接，链接器找不到它。
+
+打印的是**数量**而不是一份清单：铺盘的结果是一棵树，逐个报路径会把终端刷成一份目录树；而"一个都没写"这种真正需要警觉的情况，数量已经说完了。`weave` 报"页"而不是"文件"：它写的是给人看的页，跟 `tangle` 的产物不是一路货。
+
+`serve` 的根目录默认写死成 `weave`，看似是不该有的默契；但它有两个理由：`weave` 的默认输出就是当前目录下的 `weave/`，而 `serve` 唯一正当的用途是"把我刚铺好的那本书打开看看"。真换了目录，命令行会明说。
+
+退出码只有三种：
+
+| 码 | 含义 | 谁该改 |
+|---|---|---|
+| 0 | 成功 | —— |
+| 1 | 源写错了（`parse` / `merge` / `tangle` 抛的） | 改 `.nw` |
+| 2 | 敲错了（子命令、开关、用法） | 改调用的那一行 |
+
+分开的理由是**构建脚本要据此决定怪谁**。混成一个码，调用方只能去正则匹配错误文本，而那串文本是会变的中文。
+
+## 六、run：异常在这里收敛
+
+`run` 是唯一一个既碰参数又碰实现的地方，所以它也是唯一一个 `catch` 的地方——往上到 `main` 之间不该再有异常能漏出去。
+
+<< run 本体 >>= @
+	int run(int argc, char** argv) {
+		try {
+			Options o = read_args(argc, argv);
+			if (is_help(o.command)) {
+				std::cout << usage();
+				return 0;
+			}
+			if (o.command == "tangle") return cmd_tangle(o);
+			if (o.command == "weave") return cmd_weave(o);
+			if (o.command == "serve") return cmd_serve(o);
+			throw Error("nw", 0, "不认识的命令：" + o.command);
+		} catch (Error& e) {
+			// file 是 "nw" 的错误都是用法错：它不是从某个源文件里抛出来的。
+			bool usage_error = e.file == "nw";
+			std::cerr << e.where() << "\n";
+			if (usage_error) std::cerr << usage();
+			return usage_error ? 2 : 1;
+		}
+	}
+~@
+
+一个 `catch` 就够，因为"谁的错"这件事 `Error` 自己已经带着：**`file` 是 `nw` 的，就是用法错。** 用法错没有源文件可指，所以那个字段被借来当戳。分两个 `try` 也能做到同样的事，但那是把这条规则写两遍——第一遍写在 `try` 的位置上，第二遍写在以后每个新增命令的位置上。
+
+`--help` 走 0 而不是 2：它是被要求的，不是敲错的。
+
+## 七、收尾
+
+`run` 吞掉异常之后，`main` 只剩三行——这就是把实现全塞进 `nw` 命名空间的唯一理由。
+
+<< main 的尾 >>= @
+	}  // namespace nw
+
+	int main(int argc, char** argv) {
+		return nw::run(argc, argv);
+	}
+~@
+
+`serve` 不走 `tangle` 那条路，所以它也是唯一一条**不使用输入文件列表**的命令。它的参数是一个目录，那就不该叫 `files`；但 `Options` 只有一个位置留给"剩下的词"，多加一个字段等于让同一串词有两个去向。这里的选择是：字段叫 `files`，`serve` 自己知道它指的是目录。
+
+到这里，入口齐了：三条命令、三个退出码、一个 `catch`。剩下的章讲另外两个出口的实现——`weave` 怎么把同一份源排成一本能读的书，`serve` 怎么把那些页摆出去。

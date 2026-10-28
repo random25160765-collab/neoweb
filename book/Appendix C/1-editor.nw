@@ -1,0 +1,442 @@
+# 编辑器
+
+读者与这本书的第一次接触，不是 `nw tangle`，也不是 `nw weave`，而是在编辑器里点开一个 `.nw`。
+
+所以插件是项目的一部分：它负责让这份源**读得下去**，顺便替人少敲几个字。职责边界也写在这里，免得以后膨胀：**只看不动**——着色、语言配置、片段、图标。不做 tangle、不做跳转、不做预览。那些等处理器稳定下来，让编辑器去调处理器，而不是在插件里重写一遍语义。
+
+这也是这一版与 v2 最大的差别：v2 的插件装了一个 TextMate 解释器（`vscode-textmate` + `vscode-oniguruma` + 两百份语法），想在编辑器里给块体做语言着色。它确实能着色，代价是一千行 JS 与三个 npm 依赖，而且永远比宿主编辑器慢一步。v3 砍掉它：**块体是单色**。
+
+这个取舍写在这里，因为它是一个真实的损失：读 `sort.c` 那一段时，编辑器不会把 `int` 染成蓝色。换来的是插件只有两百行、零依赖，并且只有一处需要维护的正则表。
+
+## 一、接线
+
+七个产物：清单、语言配置、片段、生成器、扩展、两个图标。它们落在 `editor/` 下，在骨架篇挂着。
+
+!! editor::
+
+file<json> package @
+	<< 清单 >>
+~@
+
+file<json> language-configuration @
+	<< 语言配置 >>
+~@
+
+file<js> extension @
+	<< 扩展 >>
+~@
+
+清单里那条 `main` 指的就是 `extension.js`；语法文件的路径指的就是下面生成器写出的那个文件。三处路径对不上时，编辑器不会报错——它只是不生效。
+
+## 二、清单
+
+`package.json` 的每一项都有理由：
+
+- `engines` 写 `^1.80.0`，因为用到了 `contributes.languages.icon`（文件栏图标）——更老的版本会静默忽略它，作者会以为图标画错了。
+- **故意没有 `dependencies`。** 装了依赖就要有 `node_modules`、要锁版本、要在别人机器上跑 `npm install`；而这份插件只做一件事，用不上它们。
+- 没有 `embeddedLanguages`：那管的是"这段代码算哪个语言"的少数功能（自动缩进、括号匹配），不管颜色。颜色这一层我们不做。
+
+`configurationDefaults` 给 `.nw` 钉了三项：自动换行（中文长句必需）、tab 宽 4、**用 tab 缩进**——块体里那一级缩进就是 tab，混用空格会让同一文件里出现两种缩进。
+
+同一处还钉了两族 scope 的颜色：
+
+- `keyword.control.chunk.*` → 深紫：`~@` 落在这族里，它是段落边界，扫视时该先看到它；
+- `punctuation.definition.chunk` → 蓝：`<<` 与 `>>` 都是它，块头与引用一样。
+
+<< 清单 >>= @
+	{
+	  "name": "nw",
+	  "displayName": "Neoweb",
+	  "description": "Neoweb 文学化编程的语法与片段。",
+	  "version": "0.2.0",
+	  "publisher": "neoweb",
+	  "license": "GPL-3.0-or-later",
+	  "main": "./extension.js",
+	  "activationEvents": [
+	    "onLanguage:nw"
+	  ],
+	  "engines": {
+	    "vscode": "^1.80.0"
+	  },
+	  "categories": [
+	    "Programming Languages"
+	  ],
+	  "contributes": {
+	    "languages": [
+	      {
+	        "id": "nw",
+	        "aliases": [
+	          "Neoweb",
+	          "nw"
+	        ],
+	        "extensions": [
+	          ".nw"
+	        ],
+	        "configuration": "./language-configuration.json",
+	        "icon": {
+	          "light": "./icons/nw.svg",
+	          "dark": "./icons/nw-dark.svg"
+	        }
+	      }
+	    ],
+	    "grammars": [
+	      {
+	        "language": "nw",
+	        "scopeName": "source.nw",
+	        "path": "./syntaxes/nw.tmLanguage.json"
+	      }
+	    ],
+	    "snippets": [
+	      {
+	        "language": "nw",
+	        "path": "./snippets/nw.json"
+	      }
+	    ],
+	    "commands": [
+	      {
+	        "command": "nw.enter",
+	        "title": "Neoweb: 开一个块（补上 ~@）"
+	      }
+	    ],
+	    "keybindings": [
+	      {
+	        "command": "nw.enter",
+	        "key": "enter",
+	        "when": "editorTextFocus && editorLangId == nw"
+	      }
+	    ],
+	    "configurationDefaults": {
+	      "[nw]": {
+	        "editor.wordWrap": "on",
+	        "editor.tabSize": 4,
+	        "editor.insertSpaces": false,
+	        "editor.tokenColorCustomizations": {
+	          "textMateRules": [
+	            {
+	              "scope": "keyword.control.chunk",
+	              "settings": {
+	                "foreground": "#8B5CF6"
+	              }
+	            },
+	            {
+	              "scope": "punctuation.definition.chunk",
+	              "settings": {
+	                "foreground": "#3B82F6"
+	              }
+	            }
+	          ]
+	        }
+	      }
+	    }
+	  }
+	}
+~@
+
+`when` 那一行是必要的：没有它，这条绑定会在整个编辑器里抢走回车——包括终端和搜索框。
+
+用户自己写过 `tokenColorCustomizations` 时，这份默认值会被整份替换，两个边界标记退回主题色。那是设置项的规则，不是我们的选择。
+
+## 三、语言配置
+
+`wordPattern` 把 `<<…>>` 放在最前面，双击就能选中整个块名；不然双击只选到 `merge`，要手动补 `<<`。
+
+`brackets` 只声明**真正的编程括号**，故意不写 `<<`/`>>`：写了会被"括号对着色"接管——`<<` 随嵌套换色、还会画一条竖线到 `>>`，把结构标记画成代码括号。它自己那一族颜色在清单里钉死了，一处写、到处一样。
+
+`autoClosingPairs` 里也不写 `<<`/`>>`：写 C 时 `a << b` 会被自动补成 `a << b >>`，比不补更烦人。**配对高亮与自动补全是两件事**，前者只管颜色，后者会改文本。
+
+折叠标记按 v3 的三类块各写一条：块头 `<< 名字 >>= @`、`file`/`dir` 定义、`!!` 命名空间；收尾分别是 `~@` 与 `~::`。
+
+<< 语言配置 >>= @
+	{
+	  "wordPattern": "(<<[^<>\\n]+>>)|([\\w\\u4e00-\\u9fa5]+)",
+	  "brackets": [
+	    ["{", "}"],
+	    ["[", "]"],
+	    ["(", ")"]
+	  ],
+	  "autoClosingPairs": [
+	    { "open": "`", "close": "`" },
+	    { "open": "\"", "close": "\"" },
+	    { "open": "'", "close": "'" },
+	    { "open": "(", "close": ")" },
+	    { "open": "[", "close": "]" },
+	    { "open": "{", "close": "}" }
+	  ],
+	  "surroundingPairs": [
+	    ["<<", ">>"],
+	    ["`", "`"],
+	    ["\"", "\""],
+	    ["'", "'"],
+	    ["(", ")"],
+	    ["[", "]"],
+	    ["{", "}"]
+	  ],
+	  "folding": {
+	    "markers": {
+	      "start": "^(\\s*)(<<[^<>]*>>\\s*=\\s*@|(?:file|dir)\\b[^@;]*@|[!]{2}\\s*$)\\s*$",
+	      "end": "^(\\s*)(~@|~::)\\s*$"
+	    }
+	  }
+	}
+~@
+
+## 四、片段
+
+v3 有五种头，五种模板。片段的作用不是省字，是**让作者每次都写对**：体内缩进一级、`@` 前留一个空格、`~@` 顶格。
+
+<< 片段 >>= @
+	{
+	  "chunk": {
+	    "prefix": "chunk",
+	    "body": ["<< ${1:name} >>= @", "\t$0", "~@"],
+	    "description": "块：<< 名字 >>= @ + 缩进一级的代码 + 顶格 ~@"
+	  },
+	  "wire": {
+	    "prefix": "file",
+	    "body": ["file<${1:cpp}> ${2:name} @", "\t$0", "~@"],
+	    "description": "接线：一个产物由哪些块组成"
+	  },
+	  "dir": {
+	    "prefix": "dir",
+	    "body": ["dir ${1:name} @", "\t$0", "~@"],
+	    "description": "目录：只装挂载"
+	  },
+	  "mount": {
+	    "prefix": "mount",
+	    "body": ["file<${1:cpp}> ${2:name};"],
+	    "description": "挂载：把一个文件挂进当前目录"
+	  },
+	  "space": {
+	    "prefix": "space",
+	    "body": ["!! ${1:util}::", "$0", "~::"],
+	    "description": "命名空间：让七个示例都能有 << main >>"
+	  },
+	  "ref": {
+	    "prefix": "ref",
+	    "body": ["<< ${1:name} >>"],
+	    "description": "引用：把一个块贴到这里"
+	  }
+	}
+~@
+
+产物名就叫 `nw`：片段文件叫什么无所谓，清单指到哪就是哪。它落在 `editor/snippets/nw.json`，与清单里那条路径对上。
+
+file<json> nw @
+	<< 片段 >>
+~@
+
+## 五、语法：结构归语法，颜色归主题
+
+`nw.tmLanguage.json` 由脚本生成，不手写。两个理由：
+
+1. **捕获组按序号编号。** 一条块头的正则里有七八个括号，哪个是 `<<`、哪个是名字，全靠 `captures` 里的数字。手写时改正则就得重数一遍，错一个数字不会报错，只会把名字染成标点。
+2. **产物要能对账。** JSON 由脚本算出来，就永远和书一致；手写的那份迟早是"某次改了源忘了改产物"。
+
+**语言不在这里。** 这一层只认结构：`<<…>>= @`、`file…@`、`dir…@`、`!!…`、`~::`、`~@`、`<<…>>`。理由很硬：C++ 的 `namespace nw {` 会一直开到某个 `}`，区域一开，我们的 `~@` 就落在别人的区域里，而 TextMate 没有"这不合法、退回上一层"的纠错——一个没闭合的区域能把后面整章正文都吃成 C++。
+
+代价就是这一节开头说的那条：块体是单色。这不是遗漏，是这一版明确不做的事。
+
+### 5.1 正则与捕获组
+
+四条区域规则加两条行规则。`~@` 不单列：它只作为区域的结束存在，收块的与收目录的各一条；没开过任何区域的 `~@` 落在兜底的 Markdown 里，是白字——**白字也是信息：那个位置什么也没开。**
+
+<< 正则 >>= @
+	// 块头：1 空白 | 2 << | 3 名字 | 4 >> | 5 = | 6 空白 | 7 @ | 8 尾随
+	const head = `^(\\s*)(<<)([^<>\\n]+?)(>>)(=)([ \\t]*)(@)(\\s*)$`;
+
+	// 接线 / 挂载：1 空白 | 2 file 或 dir | 3 <类型> | 4 类型名 | 5 名字 | 6 @ 或 ;
+	// `file` 与 `dir` 合成一条：它们在页面上是同一种东西——声明一个位置。
+	const wire = `^(\\s*)(file|dir)(?:<([\\w-]+)>)?([ \\t]+)([^\\s@;]+)([ \\t]*)([@;])(\\s*)$`;
+
+	// 命名空间的两端。收尾写成 `~::`，与块的 `~@` 分开：两个符号，两种区域。
+	const nsOpen = `^(\\s*)(!!)([ \\t]*)([\\w.:/-]*)(\\s*)$`;
+	const nsClose = `^(\\s*)(~::)(\\s*)$`;
+
+	// 引用：整行一个或几个（用 | 隔开）。前后都要求行首/`|` 与 `|`/行尾，
+	// 否则 C 里的 `a << b | c` 会被当成三个引用。
+	const ref = `(?:^|\\|)([ \\t]*)(<<)([^<>\\n]+?)(>>)(?=[ \\t]*(?:\\|(?=[ \\t]*(?:<<|$))|$))`;
+
+	// 区域收尾：块与目录都用 ~@，所以两处共用这一个结束条件。
+	const until = {
+	  end: `^(\\s*)(~@)(\\s*)$`,
+	  endCaptures: { 2: { name: "keyword.control.chunk.terminator.nw" } }
+	};
+~@
+
+### 5.2 组装
+
+三条区域：命名空间、块、接线。命名空间自己 include 自己，所以能嵌套；块里只认引用，别的一概不管——**这一层不猜块体是什么语言**。
+
+兜底是内置的 Markdown 语法：正文、标题、列表、围栏全交给它，插件只管那几行结构。围栏也因此顺带解决了——围栏里是例子，不是块，Markdown 的区域一开，块规则就看不见那几行。
+
+<< 组装 >>= @
+	const cap = {
+	  punct: { name: "punctuation.definition.chunk.nw" },
+	  name: { name: "entity.name.function.chunk.nw" },
+	  type: { name: "storage.type.nw" },
+	  mark: { name: "keyword.control.head-marker.nw" }
+	};
+
+	const repository = {
+	  namespace: {
+	    begin: nsOpen,
+	    beginCaptures: { 2: cap.mark, 4: cap.name },
+	    end: `^(\\s*)(~::)(\\s*)$`,
+	    endCaptures: { 2: cap.mark },
+	    patterns: [
+	      { include: "#namespace" },
+	      { include: "#chunk" },
+	      { include: "#wire" },
+	      { include: "#ref" },
+	      { include: "text.html.markdown" }
+	    ]
+	  },
+	  chunk: {
+	    begin: head,
+	    beginCaptures: { 2: cap.punct, 3: cap.name, 4: cap.punct, 5: cap.mark, 7: cap.mark },
+	    ...until,
+	    patterns: [{ include: "#ref" }]
+	  },
+	  wire: {
+	    begin: wire,
+	    beginCaptures: { 2: cap.mark, 4: cap.type, 5: cap.name, 7: cap.mark },
+	    ...until,
+	    patterns: [{ include: "#ref" }]
+	  },
+	  ref: {
+	    match: ref,
+	    captures: { 2: cap.punct, 3: cap.name, 4: cap.punct }
+	  }
+	};
+
+	const grammar = {
+	  $schema: "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	  name: "Neoweb",
+	  scopeName: "source.nw",
+	  patterns: [
+	    { include: "#namespace" },
+	    { include: "#chunk" },
+	    { include: "#wire" },
+	    { include: "#ref" },
+	    { include: "text.html.markdown" }
+	  ],
+	  repository
+	};
+~@
+
+注意 `wire` 那条规则同时管 `@` 与 `;`：开块的用 `@`，挂载的用 `;`，两者的区别对未来读者重要、对颜色不重要——**同一族的记号染同一个颜色，这一族叫"位置声明"**。
+
+### 5.3 写出
+
+<< 生成器 >>= @
+	// 生成 syntaxes/nw.tmLanguage.json。用法：node editor/tools/gen-grammar.js
+	const fs = require("fs");
+	const path = require("path");
+
+	<< 正则 >>
+	<< 组装 >>
+
+	const out = path.join(__dirname, "..", "syntaxes", "nw.tmLanguage.json");
+	fs.mkdirSync(path.dirname(out), { recursive: true });
+	fs.writeFileSync(out, JSON.stringify(grammar, null, 2) + "\n");
+	console.log(`写出 ${out}`);
+~@
+
+`mkdirSync` 带 `{ recursive: true }`：目录不存在时先建，存在时不报错。少了它，第一次运行会在 `ENOENT` 上停下——而那个错误读起来像"语法文件写错了"。
+
+file<js> gen-grammar @
+	<< 生成器 >>
+~@
+
+## 六、扩展：只做一件事
+
+回车那条命令解决的问题很小：写完 `<< 名字 >>= @` 之后，回车要打三次（换行、缩进、收尾）。命令把它压成一次，并且**把 `~@` 放在正确的位置**——这一句是它的全部价值。
+
+它不改文本的任何其他部分，也不在保存时做任何事。插件写得越少，坏得越少。
+
+<< 扩展 >>= @
+	const vscode = require("vscode");
+
+	// 头行：块头、file/dir 定义、命名空间开层。
+	const HEAD = /^\s*(?:<<[^<>]*>>\s*=\s*@|(?:file|dir)\b[^@;]*@|!!\s*\S*)\s*$/;
+
+	function activate(context) {
+	  context.subscriptions.push(
+	    vscode.commands.registerCommand("nw.enter", () => {
+	      const editor = vscode.window.activeTextEditor;
+	      if (!editor) return;
+	      const line = editor.document.lineAt(editor.selection.active.line).text;
+
+	      // 不在头上就老实换行：这条命令只替人少打两下，不猜人的意图。
+	      if (!HEAD.test(line)) {
+	        vscode.commands.executeCommand("type", { text: "\n" });
+	        return;
+	      }
+
+	      const indent = line.match(/^\s*/)[0] + "\t";
+	      const closer = line.trim().startsWith("!!") ? "~::" : "~@";
+	      editor.insertSnippet(
+	        new vscode.SnippetString("\n" + indent + "$0\n" + closer)
+	      );
+	    })
+	  );
+	}
+
+	function deactivate() {}
+
+	module.exports = { activate, deactivate };
+~@
+
+`$0` 是光标落点：插完之后人在体内那一行，收尾已经等在下面。`insertSnippet` 而不是三次 `type`：一次编辑是一次撤销，Ctrl-Z 不会只退回半行。
+
+## 七、图标
+
+两个 16×16 的 SVG，图案一样：**左边两行短文、右边一块代码**。不用尖括号——它跟 HTML 的图标撞，而 `.nw` 不是 HTML。
+
+深浅两档不是"两种风格"，是两套对比度：浅色主题里背景是白的，实心块要压深；深色主题里反过来。
+
+<< 图标浅 >>= @
+	<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+	  <rect x="1" y="2" width="6" height="1.6" rx="0.8" fill="#3B82F6"/>
+	  <rect x="1" y="5.2" width="6" height="1.6" rx="0.8" fill="#3B82F6"/>
+	  <rect x="1" y="8.4" width="4.5" height="1.6" rx="0.8" fill="#93C5FD"/>
+	  <rect x="8.5" y="2" width="6.5" height="11" rx="1.5" fill="#1F2937"/>
+	  <rect x="9.8" y="4" width="4" height="1.2" rx="0.6" fill="#8B5CF6"/>
+	  <rect x="9.8" y="6.4" width="3" height="1.2" rx="0.6" fill="#E5E7EB"/>
+	  <rect x="9.8" y="8.8" width="3.8" height="1.2" rx="0.6" fill="#E5E7EB"/>
+	</svg>
+~@
+
+<< 图标深 >>= @
+	<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+	  <rect x="1" y="2" width="6" height="1.6" rx="0.8" fill="#60A5FA"/>
+	  <rect x="1" y="5.2" width="6" height="1.6" rx="0.8" fill="#60A5FA"/>
+	  <rect x="1" y="8.4" width="4.5" height="1.6" rx="0.8" fill="#DBEAFE"/>
+	  <rect x="8.5" y="2" width="6.5" height="11" rx="1.5" fill="#111827"/>
+	  <rect x="9.8" y="4" width="4" height="1.2" rx="0.6" fill="#A78BFA"/>
+	  <rect x="9.8" y="6.4" width="3" height="1.2" rx="0.6" fill="#F9FAFB"/>
+	  <rect x="9.8" y="8.8" width="3.8" height="1.2" rx="0.6" fill="#F9FAFB"/>
+	</svg>
+~@
+
+file<svg> nw @
+	<< 图标浅 >>
+~@
+
+file<svg> nw-dark @
+	<< 图标深 >>
+~@
+
+## 八、生成与安装
+
+```
+nw tangle -o . book/skeleton.nw "book/Appendix C"/*.nw   # 铺出 editor/
+node editor/tools/gen-grammar.js                          # 写出 syntaxes/nw.tmLanguage.json
+ln -s "$PWD/editor" ~/.vscode/extensions/neoweb.nw        # 装成扩展目录
+```
+
+第二条命令不能少：`tmLanguage` 是脚本的产物，不是 tangle 的产物——它得算一遍正则再写出来。这也是它没有挂进骨架的原因：**骨架声明的是"哪些文件存在"，而这一份的内容来自另一条命令。**
+
+第三条是把目录软链进扩展位置（VS Code 与它的下游都认这一层）。改完 `.nw` 重铺、重启窗口，颜色就跟着变。
+
+~::

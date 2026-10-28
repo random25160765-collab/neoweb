@@ -1,0 +1,336 @@
+# Markdown 子集
+
+tangle 的产物给编译器，weave 的产物给人。给人的那一半要多回答一个问题，编译器从来不问：**读者该按什么顺序、以什么密度看到这些东西？**
+
+答案在源文件里已经写好了——散文在哪、块在哪，作者已经用行排过一遍。所以 weave 的第一件事不是渲染，而是**把一篇源按行重新切成两股**：散文段与块定义，顺序照原文。这一篇写这第一刀，和散文那一股的出口（Markdown → HTML）。
+
+## 一、接线
+
+file<cpp> weave @
+	<< weave 的头 >>
+	<< 读原篇 >>
+	<< 适配层 >>
+	<< 两种节点 >>
+	<< 块落在哪 >>
+	<< 着色 >>
+	<< 一个块 >>
+	<< 接线 >>
+	<< 样式 >>
+	<< 页面外壳 >>
+	<< 篇的身份 >>
+	<< 站点 >>
+	<< 左栏 >>
+	<< 上下章 >>
+	<< 目录页 >>
+	<< 目录 >>
+	<< 一页 >>
+	<< 铺开 >>
+	<< weave 的尾 >>
+~@
+
+这一篇只铺下前两块砖。块怎么画、页怎么排、目录怎么来，是后面三篇的事——它们各自往这个清单里添名字，添的时候顺序要照顾编译（先有散文，才谈得上散文与块交错）。
+
+## 二、头
+
+第三方头文件只在这个文件里出现：`nw.hpp` 写着"没有第三方依赖"，那条规矩由它自己守。两个库都只服务渲染，别的 `.cpp` 不需要知道。
+
+<< weave 的头 >>= @
+	#include "nw.hpp"
+
+	// 第三方只在这里出现：nw.hpp 的"无第三方依赖"由它自己守。
+	// 两个库各管一半：cmark 管散文，source-highlight 管代码的颜色。
+	#include <cmark-gfm-core-extensions.h>
+	#include <cmark-gfm.h>
+	#include <srchilite/sourcehighlight.h>
+
+	#include <algorithm>
+
+	namespace nw {
+	namespace {
+~@
+
+## 三、切三股：读原篇
+
+`Document` 里没有散文。这是有意为之：散文是**原文的形状**，AST 只该有结构。把散文复制进 AST，等于给同一段话造两份真相——解析器改一个字，渲染出来的就是另一个版本。
+
+那么 weave 需要什么？只需要知道**每一块吃到哪一行**。`line` 与 `end_line` 正好是这两个端点（第三篇里那两个字段就是为这里加的），于是渲染时重读源文件、跳过块区、其余行按原顺序攒成散文段，就够了。
+
+但"块"有三种，不止一种：`<< x >>= @` 是**一块实现**，`file ... @` 是**一次接线**，`dir ... @` 是一个目录的内容。三者都要按原文排进页面——尤其是接线，读者看接线就是在看这一页的顺序，绝不能糊成一段散文（`file<hpp> nw @` 里的 `<hpp>` 甚至会被浏览器当成标签）。
+
+<< 读原篇 >>= @
+	// 一篇源被切成一段一段：散文段、一块实现、或者一次接线。
+	// 顺序就是原文顺序——weave 不重排，重排是作者在源里已经做过的事。
+	struct Piece {
+		enum Kind { Prose, Chunk, Wire } kind = Prose;
+		size_t idx = 0;          // Chunk：chunks 里的下标
+		string key = "";         // Wire：file 的键，或 dir 的名字
+		bool is_dir = false;     // Wire：接的是目录还是文件
+		int first = 0;           // Prose / Wire：第一行在源里的行号（1 基）
+		vector<string> lines;    // Prose / Wire：原文行，连空行一起留着
+	};
+
+	// 按行读源：三种块挖出来，其余攒成散文段。
+	// 块的范围靠 line ~ end_line 卡住——解析器替 weave 记下的那两个端点。
+	vector<Piece> read_source(const Document& doc, const string& src) {
+		vector<string> lines = split_lines(read_file(src));
+		int total = static_cast<int>(lines.size());
+		struct Block {
+			Piece piece;
+			int end = 0;
+		};
+		map<int, Block> at;   // 块头行号 → 那一块
+		for (size_t i = 0; i < doc.chunks.size(); ++i) {
+			const Chunk& c = doc.chunks[i];
+			if (c.src_file != src || c.line <= 0) continue;
+			Block b;
+			b.piece.kind = Piece::Chunk;
+			b.piece.idx = i;
+			b.end = c.end_line > c.line ? c.end_line : c.line;
+			at[c.line] = b;
+		}
+		for (const auto& kv : doc.files) {
+			const FileNode& f = kv.second;
+			if (f.src_file != src || f.line <= 0 || f.end_line <= f.line) continue;
+			Block b;
+			b.piece.kind = Piece::Wire;
+			b.piece.key = kv.first;
+			b.end = f.end_line;
+			at[f.line] = b;
+		}
+		for (const auto& kv : doc.dirs) {
+			const DirNode& d = kv.second;
+			if (d.src_file != src || d.line <= 0 || d.end_line <= d.line) continue;
+			Block b;
+			b.piece.kind = Piece::Wire;
+			b.piece.key = kv.first;
+			b.piece.is_dir = true;
+			b.end = d.end_line;
+			at[d.line] = b;
+		}
+
+		vector<Piece> out;
+		vector<string> prose;
+		int prose_first = 0;
+		auto flush = [&]() {
+			if (prose.empty()) return;
+			Piece p;
+			p.kind = Piece::Prose;
+			p.first = prose_first;
+			p.lines = prose;
+			out.push_back(p);
+			prose.clear();
+		};
+		for (int no = 1; no <= total; ++no) {
+			auto it = at.find(no);
+			if (it == at.end()) {
+				if (prose.empty()) prose_first = no;
+				prose.push_back(lines[no - 1]);
+				continue;
+			}
+			flush();
+			Piece p = it->second.piece;
+			int end = it->second.end;
+			p.first = no;
+			for (int k = no; k <= end && k <= total; ++k) p.lines.push_back(lines[k - 1]);
+			out.push_back(p);
+			no = end;   // 整块跳过：块里的行由那一块自己排，不再走散文
+		}
+		flush();
+		return out;
+	}
+~@
+
+四处值得说：
+
+- **散文段连空行一起留**。Markdown 靠空行分段、收表格、认列表；先裁掉再渲染，段落会粘成一团。
+- **只收本篇的块**。同一个 `Document` 里有全书所有篇的块、所有 file 与 dir，按 `src_file` 滤一道，别人的东西不该在这里冒出来。
+- **结束行缺失时不跳**。`end_line` 为 0 说明那块没闭合——解析器本该报错，真走到这里就退化成"只丢块头那一行"，至少不把整篇吞掉。
+- **接线块连头带尾一起收**。`file<hpp> nw @` 与 `~@` 都要留在页面上：读者要看见"这个产物从哪一行开始接"。所以 Wire 那一股存的是整段原文，不是块体。
+
+## 四、不自己写 Markdown
+
+下一步是把散文段变成 HTML。这里有一个诱惑：既然语法已经这么小，不如顺手写个 Markdown 解析器，零依赖、可控。
+
+不写。理由不是懒，是**代价转移得不是地方**：Markdown 的坑（嵌套列表、表格对齐、行内代码里含反引号、链接里含括号）是几十个边界条件，自己写就得一条条踩；而这些坑与这本书要讲的东西无关。用一个成熟的 GFM 解析器，等于把"排版正确"外包出去，把注意力留给"顺序与密度"——那才是 weave 真正要回答的问题。
+
+代价写在明处：新机器 `make` 之前要装 `libcmark-gfm` 与 `source-highlight`。这个代价我们认，因为它只落在**构建机**上，不落在读者身上。
+
+## 五、适配层：一个递归，两种节点
+
+cmark 给出的是一棵节点树。我们不做自己的 AST，直接把树走成 HTML——**一个递归，两种节点**：块级节点看类型决定标签，行内节点同理。中间不落任何中间表示，因为没有任何一方需要它。
+
+有一件事必须先说：cmark 是 CommonMark，GFM 的那些记号（表格、删除线、任务列表）都是**扩展**，注册了才认。不注册不报错——表格退化成一段带竖线的文字，`~~x~~` 变成两个波浪线。这种失败最难发现：页面看起来"能用"，只是丑。
+
+<< 适配层 >>= @
+	// 散文 → cmark 树。GFM 的扩展要一个个显式注册：不注册时表格退化成段落、
+	// ~~删除~~ 退化成两个波浪线，而"退化"不会报错，只会在页面上留下痕迹。
+	cmark_node* md_tree(const vector<string>& lines) {
+		static bool once = []() {
+			cmark_gfm_core_extensions_ensure_registered();
+			return true;
+		}();
+		(void)once;
+		cmark_parser* p = cmark_parser_new(CMARK_OPT_DEFAULT);
+		for (const char* ext : {"table", "strikethrough"})
+			cmark_parser_attach_syntax_extension(p, cmark_find_syntax_extension(ext));
+		string src = join_lines(lines);
+		cmark_parser_feed(p, src.data(), src.size());
+		cmark_node* tree = cmark_parser_finish(p);
+		cmark_parser_free(p);
+		return tree;
+	}
+
+	// 行内与块级互相调用（一段里有列表、列表项里有强调）：先声明，落盘顺序不必迁就调用顺序。
+	void md_inline(cmark_node* n, std::ostringstream& out);
+	void md_block(cmark_node* n, std::ostringstream& out);
+
+	// cmark 的 literal 对容器节点是 NULL：统一成一个空串，省得每处判空。
+	string inert(const char* s) { return s ? string(s) : string(); }
+
+	void md_blocks(cmark_node* n, std::ostringstream& out) {
+		for (cmark_node* c = cmark_node_first_child(n); c; c = cmark_node_next(c)) md_block(c, out);
+	}
+
+	void md_inlines(cmark_node* n, std::ostringstream& out) {
+		for (cmark_node* c = cmark_node_first_child(n); c; c = cmark_node_next(c)) md_inline(c, out);
+	}
+
+	string md_html(const vector<string>& lines) {
+		if (is_blank(join_lines(lines))) return string();
+		cmark_node* tree = md_tree(lines);
+		std::ostringstream out;
+		md_blocks(tree, out);
+		cmark_node_free(tree);
+		return out.str();
+	}
+~@
+
+`md_inline` 与 `md_block` 各占一条链，互相调用。它们的内容就是一张对照表：
+
+<< 两种节点 >>= @
+	void md_inline(cmark_node* n, std::ostringstream& out) {
+		string t = cmark_node_get_type_string(n);
+		if (t == "text") {
+			out << html_escape(inert(cmark_node_get_literal(n)));
+			return;
+		}
+		if (t == "softbreak") { out << "\n"; return; }
+		if (t == "linebreak") { out << "<br>\n"; return; }
+		if (t == "code") {
+			out << "<code>" << html_escape(inert(cmark_node_get_literal(n))) << "</code>";
+			return;
+		}
+		if (t == "emph") { out << "<em>"; md_inlines(n, out); out << "</em>"; return; }
+		if (t == "strong") { out << "<strong>"; md_inlines(n, out); out << "</strong>"; return; }
+		if (t == "strikethrough") { out << "<del>"; md_inlines(n, out); out << "</del>"; return; }
+		if (t == "link") {
+			out << "<a href=\"" << html_escape(inert(cmark_node_get_url(n))) << "\">";
+			md_inlines(n, out);
+			out << "</a>";
+			return;
+		}
+		if (t == "image") {
+			// 这本书没有外部图片：出现 <img> 多半是路径写错，宁可显示成一个显眼的记号。
+			out << "<span class=\"miss\">［图：" << html_escape(inert(cmark_node_get_url(n))) << "］</span>";
+			return;
+		}
+		if (t == "html_inline") { out << inert(cmark_node_get_literal(n)); return; }
+		md_inlines(n, out);   // 不认识的容器：至少别丢内容
+	}
+
+	void md_block(cmark_node* n, std::ostringstream& out) {
+		string t = cmark_node_get_type_string(n);
+		if (t == "paragraph") { out << "<p>"; md_inlines(n, out); out << "</p>\n"; return; }
+		if (t == "heading") {
+			int lv = cmark_node_get_heading_level(n);
+			if (lv < 1 || lv > 6) lv = 6;
+			out << "<h" << lv << ">"; md_inlines(n, out); out << "</h" << lv << ">\n";
+			return;
+		}
+		if (t == "block_quote") { out << "<blockquote>\n"; md_blocks(n, out); out << "</blockquote>\n"; return; }
+		if (t == "list") {
+			bool ordered = cmark_node_get_list_type(n) == CMARK_ORDERED_LIST;
+			out << (ordered ? "<ol>\n" : "<ul>\n");
+			md_blocks(n, out);
+			out << (ordered ? "</ol>\n" : "</ul>\n");
+			return;
+		}
+		if (t == "item") {
+			// 紧凑列表：只有一个段落时直接出文字，不套 <p>——否则每条都多一层行距。
+			cmark_node* first = cmark_node_first_child(n);
+			out << "<li>";
+			if (first && string(cmark_node_get_type_string(first)) == "paragraph" && !cmark_node_next(first))
+				md_inlines(first, out);
+			else
+				md_blocks(n, out);
+			out << "</li>\n";
+			return;
+		}
+		if (t == "code_block") {
+			// 散文里的围栏是例子，不是产物：不着色，只要形状对。
+			out << "<pre class=\"sample\"><code>"
+			    << html_escape(inert(cmark_node_get_literal(n))) << "</code></pre>\n";
+			return;
+		}
+		if (t == "thematic_break") { out << "<hr>\n"; return; }
+		if (t == "html_block") { out << inert(cmark_node_get_literal(n)); return; }
+		if (t == "table") {
+			// 表头先出（cmark 里它一定是第一个孩子），其余行进 tbody：
+			// 没有 tbody 时，有些浏览器会把表格内容当成游离节点。
+			cmark_node* h = cmark_node_first_child(n);
+			out << "<table>\n";
+			if (h && string(cmark_node_get_type_string(h)) == "table_header") {
+				md_block(h, out);
+				h = cmark_node_next(h);
+			}
+			out << "<tbody>\n";
+			for (cmark_node* r = h; r; r = cmark_node_next(r)) md_block(r, out);
+			out << "</tbody>\n</table>\n";
+			return;
+		}
+		if (t == "table_header") { out << "<thead><tr>"; md_blocks(n, out); out << "</tr></thead>\n"; return; }
+		if (t == "table_row") { out << "<tr>"; md_blocks(n, out); out << "</tr>\n"; return; }
+		if (t == "table_cell") {
+			// 表头格子与数据格子同一个类型：往上找最近的 table_header / table_row。
+			bool head = false;
+			for (cmark_node* p = cmark_node_parent(n); p; p = cmark_node_parent(p)) {
+				string pt = cmark_node_get_type_string(p);
+				if (pt == "table_header") { head = true; break; }
+				if (pt == "table_row") break;
+			}
+			out << (head ? "<th>" : "<td>");
+			md_inlines(n, out);
+			out << (head ? "</th>" : "</td>");
+			return;
+		}
+		md_blocks(n, out);   // 不认识的容器：至少别丢内容
+	}
+~@
+
+三条取舍：
+
+**图片不渲染成 `<img>`**。这本书的插图都是代码块与表格，真出现一个图路径，八成是写错了；显示成一个显眼的记号，比页面上一个破图标更容易被发现。
+
+**紧凑列表不套 `<p>`**。`<li><p>一条</p></li>` 是合法的，但每条都多一层行距；中文列表本来行距就宽，加上这层会散成另一段。
+
+**`html_block` 原样透传**。散文里写 `<br>`、`<kbd>` 这类小东西不必先教 Markdown 支持它；透传的代价是作者要自己保证标签配对。
+
+## 六、这一篇到哪为止
+
+到这里，一篇源已经能被切成"散文段 + 块"的序列，散文段也已经能变成 HTML 片段。但**页还不存在**：块怎么画、页怎么排，都还没有。
+
+所以这一篇的验收只到编译这一层：
+
+```
+python3 nw3.py check book/skeleton.nw book/Chapter\ 5/1-markdown.nw
+python3 nw3.py tangle -o /tmp/w5 book/skeleton.nw book/Chapter\ 5/1-markdown.nw
+g++ -std=c++17 -Wall -Wextra -Wno-unused-function -I/tmp/w5/tangle -c /tmp/w5/tangle/weave.cpp
+```
+
+`-Wno-unused-function` 是**正在施工**的临时豁免：`md_html` 还没有调用方，等下一篇把块与页接上，这条就不再需要。最终产物里不许留这种豁免——构建严格，豁免只配出现在"这一篇还没接完"的中间态里。
+
+<< weave 的尾 >>= @
+	}  // namespace nw
+~@
+
+下一篇画块：序号、锚点、着色，以及"这一块落在哪个产物"这件只有树知道的事。

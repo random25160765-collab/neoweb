@@ -1,0 +1,135 @@
+# 书目录
+
+一页 HTML 能看了，但它还不知道自己在书里排第几——没有前后章，没有左栏，读者只能一页一页翻文件。
+
+要知道位置，就得有**顺序**。顺序不能藏在命令行里：命令行是构建脚本的私事，读者不该为了知道章节次序去翻 Makefile；而且命令行给的顺序不留痕迹，下一次谁重跑一遍，顺序就可能不一样。
+
+所以顺序是一件**产物**：`book/menu.nw` 的正文里写着这份书的目录，`nw tangle` 把它抽成 `tangle/book.yaml`，`nw weave` 读它。目录是书的一篇，不是书旁边另放的一份数据。
+
+## 一、目录长什么样
+
+```yaml
+title: 文学编程
+
+parts:
+  - title: 序
+    files:
+      - book/skeleton.nw
+      - book/menu.nw
+
+  - title: 第 3 章 实现
+    files:
+      - book/Chapter 3/1-types.nw
+```
+
+三个层级：书名、部、篇。层级是给人读的，解析只认**行首关键字 + 缩进**——所以这一小节不引 YAML 库：格式是我们自己定的那几种行，认得出、报得准，比"通用但错误信息一片空白"更值。
+
+## 二、只认这几种行
+
+解析是一个四分支的状态机：`title:` 换书名，`- title:` 开一部，`files:` 进入篇清单，`- 路径` 加一篇。别的行一开始就该报错——目录写错时，人需要知道错在第几行，而不是得到一本空书。
+
+先定数据形状。`Part` 与 `Book` 在头文件里（第三篇就定好了），因为 `weave` 的接口要收它。
+
+还有一件事得提前交代：这一块的**落盘位置**与它的**讲述位置**不一样。`read_book` 是对外函数（`nw.hpp` 里有声明），必须排在匿名命名空间关掉之后，所以接线把它放在文件末尾。叙述顺序与落盘顺序在这里分了一次岔——这正是接线存在的理由：散文管理解，接线管顺序。
+
+<< 目录 >>= @
+	}  // namespace
+
+	// 读目录：书名、部、篇。只认行首关键字与缩进，不引 YAML 库——
+	// 这几种行是我们自己定的，认得出、报得准，比"通用但错误信息空白"值。
+	Book read_book(const string& path) {
+		Book b;
+		vector<string> lines = split_lines(read_file(path));
+		bool in_files = false;
+		for (size_t i = 0; i < lines.size(); ++i) {
+			const string& raw = lines[i];
+			string t = trim(raw);
+			if (t.empty() || t[0] == '#') continue;      // 空行与注释：目录里允许
+			int ws = leading_ws(raw);
+			if (ws == 0 && has_prefix(t, "title:")) {
+				b.title = trim(t.substr(6));
+				continue;
+			}
+			if (ws == 0 && t == "parts:") {
+				in_files = false;
+				continue;
+			}
+			if (has_prefix(t, "- title:")) {
+				Part p;
+				p.title = trim(t.substr(8));
+				b.parts.push_back(p);
+				in_files = false;
+				continue;
+			}
+			if (t == "files:") {
+				in_files = true;
+				continue;
+			}
+			if (has_prefix(t, "- ")) {
+				if (!in_files || b.parts.empty())
+					throw Error(path, static_cast<int>(i + 1), "这一行不知道挂在哪一部下面：" + t);
+				b.parts.back().files.push_back(trim(t.substr(2)));
+				continue;
+			}
+			throw Error(path, static_cast<int>(i + 1), "目录里认不出这一行：" + t);
+		}
+		// 展平：阅读顺序。前后章按这个走，页面的次序也按这个走。
+		for (const Part& p : b.parts)
+			for (const string& f : p.files) b.order.push_back(f);
+		return b;
+	}
+~@
+
+两处讲究。
+
+**`- title:` 必须排在 `- ` 之前判。** 两个都是"以减号开头"，顺序反了，每一部的名字都会被当成一个篇路径——而这条错误不会当场炸，要等到 `weave` 去读一个叫 `第 3 章 实现` 的文件时才炸，那时行号已经没了。
+
+**展平成 `order` 只做一次。** 前后章、左栏、目录页都要"下一篇是谁"，三处各自遍历 `parts` 会写出三份一样的循环，还容易有一处忘了跳空部。
+
+## 三、篇的身份：标题与文件名
+
+一页需要两样身份：**人看的标题**与**机器用的文件名**。
+
+标题不用另写。每篇的第一行就是 `# 数据模型` 这样的标题，作者已经写过一次了；再在目录里写一遍，就等于给同一件事造两份真相，改一处忘一处的经典开局。
+
+<< 篇的身份 >>= @
+	// 篇路径 → 文件名：取基名、去掉 .nw。同名会在 weave 里查出来报错。
+	string slug(const string& src) {
+		size_t slash = src.find_last_of("/\\");
+		string base = slash == string::npos ? src : src.substr(slash + 1);
+		size_t dot = base.rfind('.');
+		if (dot != string::npos) base = base.substr(0, dot);
+		return base;
+	}
+
+	// 一页的标题 = 它第一行 `# `。作者已经写过一次，不该在目录里再声明一遍。
+	string page_title(const string& src) {
+		static map<string, string> cache;   // 一本几十页，左栏每页都要问一次，问一次就够了
+		auto hit = cache.find(src);
+		if (hit != cache.end()) return hit->second;
+		string title;
+		for (const string& raw : split_lines(read_file(src))) {
+			string t = trim(raw);
+			if (t.empty() || has_prefix(t, "%%")) continue;
+			title = has_prefix(t, "# ") ? trim(t.substr(2)) : string();
+			break;
+		}
+		if (title.empty()) title = slug(src);   // 没有一级标题：退回文件名，至少不是空标签
+		cache[src] = title;
+		return title;
+	}
+~@
+
+`slug` 只用基名，所以 `book/Chapter 3/1-types.nw` 落成 `1-types.html`——短、可读、可以手敲。代价是不同目录下的同名篇会撞车：`Chapter 2/2-types` 与 `Chapter 3/2-types` 会抢同一个文件。v3 的办法不是"自动加前缀"（那样 URL 会变成 `Chapter-3-1-types.html` 这种只有机器看得懂的东西），而是**撞了就报错**——名字撞车是书的结构问题，该由人决定谁改名。
+
+## 四、这一篇到哪为止
+
+目录能读了，身份也有了。还差最后一篇：谁来把这两样接上——左栏、前后章、目录页、写盘。
+
+验收仍是编译（豁免照旧）：
+
+```
+g++ -std=c++17 -Wall -Wextra -Wno-unused-function -I/tmp/w5/tangle -c /tmp/w5/tangle/weave.cpp
+```
+
+`read_book` 现在就能单独真跑，喂它一份本文开头的那个 YAML：三行一个部、两行一篇，读出来的 `order` 应当与缩进里看到的顺序一致。目录是数据的入口，这一处错了，后面每一页的"下一篇"都会错。

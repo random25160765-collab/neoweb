@@ -2,23 +2,59 @@
 
 出处：`~/Source/triton/python/tutorials/06-fused-attention.py`。
 
-这一篇**不求可编译**（它需要 GPU 与 Triton 运行时）。它展示的是另一种"跨栈"：同一个文件里，上半段是**调度**，下半段是**算法**，中间那层由编译器填。
+这一篇**不求能跑**（它需要 GPU 与 Triton 运行时），但求**展开出来的 Python 是合法的**：`python3 -m py_compile` 能过。这条约束比"能跑"弱，比"看着像"强——它挡得住缩进错、括号不配对，也就是手工搬运代码时最常见的两种伤。
 
-### 一、为什么不直接写 CUDA
+它也带来这一篇唯一的形态差别：**内核是一整块，不按小节拆。** 理由在第一节末尾。
+
+## 一、接线
+
+这篇的产物落在 `examples/attention.py`，三块：导入、调度、内核。
+
+!! attn::
+
+file<py> attention @
+	<< 导入 >>
+	<< autotune >>
+	<< kernel >>
+~@
+
+三块而不是八块，是因为 **Python 的缩进是绝对语义**，而块在落盘前会被统一去掉公共缩进：一块的第一行若在函数体里（四个空格），去缩进之后它就跑到函数外面去了。v2 靠"块体原样保留"绕开这件事，v3 不绕——去缩进是块的规矩，写 Python 的人得自己把块对齐到"能独立成立"的层级。
+
+于是这里的边界只能落在顶层：一个装饰器、一个函数、一组导入。想逐节讲内核，就在散文里引它几行——**引文不进产物**，这正好是散文与代码分工的样子。
+
+## 二、为什么不直接写 CUDA
 
 注意力是 `softmax(QKᵀ / √d) · V`。写成三步，中间那个 `N×N` 矩阵要来回显存两趟——序列一长，**带宽先于算力成为瓶颈**。
 
 Flash Attention 的办法是把 N 切成块，块内做完 softmax 再乘 V，让 `N×N` 矩阵从不落地。这个变换改变的是循环顺序，而循环顺序正是编译器最难替你猜的东西。
 
-### 二、kernel 的形状：每个程序算一行 Q
+## 三、导入与调度
 
-`grid` 的第一个维度是 Q 的块数。也就是说，**一个 Triton "程序"= 一个线程块**，它负责 `BLOCK_M × HEAD_DIM` 的一小片 Q，沿 K/V 走完全程。
+<< 导入 >>= @
+	import torch
+	import triton
+	import triton.language as tl
+~@
 
-参数里那些 `strides` 是纯机械信息：张量在显存里怎么排。它们全部写成 `tl.constexpr` 之外的运行时参数，因为形状会变、布局不变。
+`key=["N_CTX"]` 的意思是：**序列长度变了才重新搜**。这是 Triton 与 CUTLASS 最不一样的地方——CUTLASS 把策略写成类型让人选，Triton 把策略写成参数让运行时试。
 
-showcase/attention.py @
+<< autotune >>= @
+	@triton.autotune(
+	    configs=[
+	        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=2, num_warps=4),
+	        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_stages=3, num_warps=8),
+	    ],
+	    key=["N_CTX"],
+	)
+~@
 
-<<kernel-signature>>= @
+## 四、内核
+
+`grid` 的第一个维度是 Q 的块数。也就是说，**一个 Triton "程序" = 一个线程块**，它负责 `BLOCK_M × HEAD_DIM` 的一小片 Q，沿 K/V 走完全程。
+
+参数里那些 `strides` 是纯机械信息：张量在显存里怎么排。它们写在 `tl.constexpr` 之外，因为形状会变、布局不变。
+
+<< kernel >>= @
 	@triton.jit
 	def _attn_fwd(Q, K, V, sm_scale, Out,
 	              stride_qz, stride_qh, stride_qm, stride_qk,
@@ -30,9 +66,31 @@ showcase/attention.py @
 	    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
 	    offs_n = tl.arange(0, BLOCK_N)
 	    offs_k = tl.arange(0, HEAD_DIM)
+	    q = tl.load(Q)
+	    # 跨 K 块携带的三样：最大值、指数和、未归一化的输出。
+	    m_i = tl.full([BLOCK_M], float("-inf"), tl.float32)
+	    l_i = tl.zeros([BLOCK_M], tl.float32)
+	    acc = tl.zeros([BLOCK_M, HEAD_DIM], tl.float32)
+	    for start_n in range(0, N_CTX, BLOCK_N):
+	        k = tl.load(K + start_n * BLOCK_N + offs_n[:, None] * stride_qk)
+	        qk = tl.dot(q, tl.trans(k))
+	        m_ij = tl.maximum(m_i, tl.max(qk, 1) * sm_scale)
+	        p = tl.math.exp2(qk * sm_scale - m_ij[:, None])
+	        alpha = tl.math.exp2(m_i - m_ij)
+	        l_ij = tl.sum(p, 1)
+	        v = tl.load(V + start_n * BLOCK_N + offs_n[:, None] * stride_qk)
+	        acc = acc * alpha[:, None]
+	        acc = tl.dot(p.to(tl.float16), v, acc)
+	        l_i = l_i * alpha + l_ij
+	        m_i = m_ij
+	    acc = acc / l_i[:, None]
+	    out_ptrs = Out + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
+	    tl.store(out_ptrs, acc.to(Out.dtype.element_ty))
 ~@
 
-### 三、状态：三样东西必须跨块携带
+下面四小节是它的读法，不是它的另一份源码。
+
+### 4.1 状态：三样东西必须跨块携带
 
 沿 K 走的时候，softmax 的分母还没算完，所以必须一边走一边记：
 
@@ -42,74 +100,25 @@ showcase/attention.py @
 
 这三样就是 online softmax 的全部状态。**注意它们都在寄存器里**，大小是 `BLOCK_M` 量级，不是 `N_CTX`。
 
-<<state>>= @
-	    # 跨 K 块携带的三样：最大值、指数和、未归一化的输出。
-	    m_i = tl.full([BLOCK_M], float("-inf"), tl.float32)
-	    l_i = tl.zeros([BLOCK_M], tl.float32)
-	    acc = tl.zeros([BLOCK_M, HEAD_DIM], tl.float32)
-~@
-
-### 四、内层循环：先算 QK，再算 PV
+### 4.2 内层循环：先算 QK，再算 PV
 
 一次迭代做两件事：`qk = Q · Kᵀ`，然后 `acc += P · V`。中间夹着 softmax 的更新。
 
-`desc_k.load(...)` 这一行是 Hopper 之后的新写法（TMA 描述符），老版本是 `tl.load(K + ...)` 加 mask。**同一段算法，搬运指令换了两代**——这类差异正好该由一段注释交代，而不是让读者去猜为什么这里多了个 `.T`。
+`tl.load(K + start_n * BLOCK_N + ...)` 这一行是搬运。Hopper 之后有 TMA 描述符的写法（`desc_k.load(...)`），老版本是直接算指针加 mask。**同一段算法，搬运指令换了两代**——这类差异该由一段注释交代，而不是让读者猜为什么这里多了个 `.T`。
 
-<<loop-qk>>= @
-	    for start_n in tl.range(lo, hi, BLOCK_N):
-	        k = desc_k.load([offsetk_y, 0]).T          # Kᵀ：(HEAD_DIM × BLOCK_N)
-	        qk = tl.dot(q, k)                          # (BLOCK_M × BLOCK_N)
-~@
-
-### 五、online softmax：两行代码，一个不变量
+### 4.3 online softmax：两行代码，一个不变量
 
 这一段是整篇的核。不变量是：**`acc / l_i` 始终等于"到目前为止的精确 softmax 输出"**。
 
 每当看到更大的 logit，就把之前的和按比例缩小——`alpha = exp(m_i - m_ij)` 就是那个比例。指数减去最大值，是为了让 `exp` 不溢出；减去之后必须补回来，补的方式就是乘 `alpha`。
 
-<<online-softmax>>= @
-	        m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
-	        qk = qk * qk_scale - m_ij[:, None]
-	        p = tl.math.exp2(qk)                       # 底数是 2：省一条乘法
+`exp2` 而不是 `exp`：`2^x` 在硬件上有直接指令，`e^x` 要先乘 `log2(e)`。把那个 `log2(e)` 提前乘进 `sm_scale`，是这类 kernel 最常见的省指令手法。
 
-	        alpha = tl.math.exp2(m_i - m_ij)           # 旧的缩多少
-	        l_ij = tl.sum(p, 1)
-
-	        acc = acc * alpha[:, None]                 # 旧账按比例缩
-	        acc = tl.dot(p.to(dtype), v, acc)          # 新账加进来
-	        l_i = l_i * alpha + l_ij
-	        m_i = m_ij
-~@
-
-`exp2` 而不是 `exp`：`2^x` 在硬件上有直接指令，`e^x` 要先乘 `log2(e)`。把 `qk_scale` 里那个 `log2(e)` 提前乘进 scale，是这类 kernel 最常见的省指令手法。
-
-### 六、写回：最后才除
+### 4.4 写回：最后才除
 
 循环外一次除法，把未归一化的 `acc` 变成输出。**这是整段算法里唯一一次除法**——放在循环里就是每块除一次，白白多算。
 
-<<store>>= @
-	    acc = acc / l_i[:, None]
-	    out_ptrs = Out + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
-	    tl.store(out_ptrs, acc.to(Out.dtype.element_ty))
-~@
-
-### 七、调度：谁决定 `BLOCK_M` 与 `num_warps`
-
-上面全是算法，一行调优都没有。调优在另一个函数里，写成配置表 + 自动搜索：
-
-<<autotune>>= @
-	@triton.autotune(
-	    configs=[
-	        triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=2, num_warps=4),
-	        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_stages=3, num_warps=8),
-	    ],
-	    key=["N_CTX"],
-	)
-~@
-
-`key=["N_CTX"]` 的意思是：**序列长度变了才重新搜**。这是 Triton 与 CUTLASS 最不一样的地方——CUTLASS 把策略写成类型让人选，Triton 把策略写成参数让运行时试。
-
-### 八、这一篇想说明什么
+## 五、这一篇想说明什么
 
 同一个 kernel，两种语言的边界很清楚：
 
@@ -119,4 +128,13 @@ showcase/attention.py @
 
 文学化源码在这里的作用，是把"哪一层在负责什么"写明白——因为读这种代码时，读者最常问的不是"这行干什么"，而是**"这行属于哪一层、我该不该在这层操心"**。
 
-~@
+## 六、核对
+
+```
+nw tangle -o /tmp/ex book/skeleton.nw "book/Appendix B/triton-attention.nw"
+python3 -m py_compile /tmp/ex/examples/attention.py
+```
+
+第二条命令只查语法：没有 GPU、没有 Triton 也能跑，而且它挡的正是这一篇最容易出的错——缩进。要真跑，得把 `q`/`k`/`v` 的加载换成原始教程里那套指针计算，那是另一个工程。
+
+~::

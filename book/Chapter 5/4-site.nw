@@ -1,0 +1,178 @@
+# 一页书
+
+四个部件都在了：散文能变 HTML，块能成卡片，目录能读，身份能算。这一篇把它们接上，让 `weave` 真的写出文件。
+
+接线添六个名字：`<< 站点 >>`、`<< 左栏 >>`、`<< 上下章 >>`、`<< 目录页 >>`、`<< 一页 >>`、`<< 铺开 >>`。前五个都是"拼"，最后一个才写盘。
+
+## 一、两张表
+
+`chunk_html` 需要两样东西：这一块落在哪些产物（显示在卡片右上角），它链到哪个锚点（实例行要变链接）。两样都是**整本书范围**的表，不能一页一算——但链接那一样有个陷阱：同页的锚点是 `#c-3`，跨页是 `1-types.html#c-3`。
+
+所以表里存"块在哪一页、第几号"，**前缀按当前页现加**。
+
+<< 站点 >>= @
+	// 一本书共用两张表：块落在哪些产物、块在哪一页第几号。
+	// 锚点前缀按当前页现加：同页 #c-n，跨页 页名#c-n。
+	Ctx make_ctx(const Document& doc, const Book& book, const string& here) {
+		Ctx ctx;
+		ctx.homes = chunk_homes(doc);
+		set<string> listed(book.order.begin(), book.order.end());
+		map<string, vector<size_t>> by_src;
+		for (size_t i = 0; i < doc.chunks.size(); ++i)
+			by_src[doc.chunks[i].src_file].push_back(i);
+		for (const auto& kv : by_src) {
+			if (!listed.count(kv.first)) continue;   // 没进目录的篇不产页：链过去只会 404
+			string page = slug(kv.first);
+			for (size_t k = 0; k < kv.second.size(); ++k) {
+				string anchor = "#c-" + std::to_string(k + 1);
+				ctx.href[kv.second[k]] = page == here ? anchor : page + ".html" + anchor;
+			}
+		}
+		return ctx;
+	}
+~@
+
+序号是这样算出来的：同一篇的块在 `chunks` 里仍按行号排（`merge` 按传入顺序接、篇内按解析顺序追加），所以"第 k 个就是第 k 号"。**不需要再排一次序**——真要排，就等于承认前面那句话不成立。哪天它不成立了，这里会静默错位，所以这一条写在注释里，也写在这里。
+
+## 二、左栏
+
+左栏是整本书的目录，常驻在每一页上。它只做三件事：部名分段、篇名成行、当前篇加重。
+
+<< 左栏 >>= @
+	// 左栏：部 → 篇，当前篇加重。名字来自各篇自己的 `# 标题`，不来自目录。
+	string nav_html(const Book& book, const string& here) {
+		std::ostringstream out;
+		if (!book.title.empty())
+			out << "<a class=\"title\" href=\"index.html\">" << html_escape(book.title) << "</a>";
+		for (const Part& p : book.parts) {
+			out << "<div class=\"part\">" << html_escape(p.title) << "</div>";
+			for (const string& f : p.files) {
+				string s = slug(f);
+				out << "<a" << (s == here ? " class=\"here\"" : "") << " href=\"" << html_escape(s)
+				    << ".html\">" << html_escape(page_title(f)) << "</a>";
+			}
+		}
+		return out.str();
+	}
+~@
+
+注意这里没有"生成一次导航、各页复用"的优化。导航里有一处随页而变（哪一个 `a` 带 `here`），要么每页生成一次，要么生成一次再替换——**前者是几十次字符串拼接，后者是一处只在深夜暴露的 bug**。这种账不需要算。
+
+## 三、上下章
+
+<< 上下章 >>= @
+	// 上下章：两头留空。第一篇没有"上一篇"、最后一篇没有"下一篇"——
+	// 空着比画一个灰按钮诚实。
+	string pager_html(const Book& book, const string& here) {
+		std::ostringstream out;
+		for (size_t i = 0; i < book.order.size(); ++i) {
+			if (slug(book.order[i]) != here) continue;
+			out << "<div class=\"pager\">";
+			if (i > 0) {
+				const string& prev = book.order[i - 1];
+				out << "<a href=\"" << html_escape(slug(prev)) << ".html\">← "
+				    << html_escape(page_title(prev)) << "</a>";
+			} else {
+				out << "<span></span>";
+			}
+			if (i + 1 < book.order.size()) {
+				const string& next = book.order[i + 1];
+				out << "<a href=\"" << html_escape(slug(next)) << ".html\">"
+				    << html_escape(page_title(next)) << " →</a>";
+			} else {
+				out << "<span></span>";
+			}
+			out << "</div>\n";
+			break;
+		}
+		return out.str();
+	}
+~@
+
+那个空 `<span>` 不是占位符的把戏：`justify-content: space-between` 需要两个格子，少一个，"下一篇"就会滑到左边，读者会以为那是"上一篇"。
+
+## 四、目录页
+
+整本书还要有一个入口页：按部列出所有篇。它不是首页文章，是一张**索引**——所以它不套左栏的当前篇高亮（没有一个"当前"），也不带上下章。
+
+<< 目录页 >>= @
+	// 目录页：按部列出全部篇。它是索引，不是文章：没有"当前篇"，也没有上下章。
+	string index_html(const Book& book) {
+		std::ostringstream out;
+		out << "<h1>" << html_escape(book.title.empty() ? string("目录") : book.title) << "</h1>\n";
+		for (const Part& p : book.parts) {
+			out << "<h2>" << html_escape(p.title) << "</h2>\n<ul class=\"toc\">\n";
+			for (const string& f : p.files)
+				out << "<li><a href=\"" << html_escape(slug(f)) << ".html\">" << html_escape(page_title(f))
+				    << "</a></li>\n";
+			out << "</ul>\n";
+		}
+		return out.str();
+	}
+~@
+
+## 五、一页
+
+现在是正题：把一条 `Piece` 序列走完，三种股各走各的出口——散文交 `md_html`，块交 `chunk_html`，接线交 `wire_html`，序号只给块加。
+
+<< 一页 >>= @
+	// 一页 = 一条 Piece 序列走到底。序号在这里数：块在篇内的定义次序。
+	string page_html(const Document& doc, const Book& book, const string& src) {
+		string here = slug(src);
+		Ctx ctx = make_ctx(doc, book, here);
+		std::ostringstream body;
+		size_t seq = 0;
+		for (const Piece& p : read_source(doc, src)) {
+			if (p.kind == Piece::Chunk) {
+				++seq;
+				body << chunk_html(doc, ctx, p.idx, seq);
+			} else if (p.kind == Piece::Wire) {
+				body << wire_html(doc, ctx, p);
+			} else {
+				body << md_html(p.lines);
+			}
+		}
+		body << pager_html(book, here);
+		return page_shell(page_title(src), nav_html(book, here), body.str());
+	}
+~@
+
+就这么十几行。前四篇铺的砖都在这里各就各位——**这就是把东西拆成部件的回报：接起来的时候不需要再想什么**。
+
+## 六、铺开
+
+最后一步是写盘。规则只有三条：目录建出来、每篇一个文件、名字不许撞。
+
+<< 铺开 >>= @
+	// 铺开：目录建好，每篇一个文件，最后补一张目录页。
+	int weave(const Document& doc, const Book& book, const string& outdir) {
+		if (book.parts.empty()) throw Error(doc.main_file, 0, "目录是空的：没有一篇可写");
+		std::filesystem::create_directories(outdir);
+		set<string> used;
+		int n = 0;
+		for (const string& src : book.order) {
+			string name = slug(src);
+			if (!used.insert(name).second)
+				throw Error(src, 0, "两篇会写成同一个文件：" + name + ".html");
+			write_file(outdir + "/" + name + ".html", page_html(doc, book, src));
+			++n;
+		}
+		write_file(outdir + "/index.html", page_shell(book.title, nav_html(book, ""), index_html(book)));
+		return n + 1;
+	}
+~@
+
+返回"写了几页"，和 `tangle` 返回"写了几个文件"是同一个约定：调用方要用它区分"什么都没写"与"写了三十页"，让它自己数就会和实现慢慢对不上。
+
+`used` 这个集合是**唯一**一处重复命名检查。`slug` 只取基名，撞车是迟早的事（同一本书里 `Chapter 2/2-types.nw` 与 `Chapter 3/2-types.nw` 都会变成 `2-types.html`），而这类错误若拖到写盘，只会得到一个文件静默覆盖另一个——页面上少一章，构建日志里什么都没有。
+
+## 七、跑起来
+
+到这一篇为止，weave 的四个部件接齐了，临时豁免取消：
+
+```
+python3 nw3.py tangle -o /tmp/w5 book/skeleton.nw "book/Chapter 3"/*.nw book/Chapter\ 4/1-cli.nw book/Chapter\ 5/*.nw
+g++ -std=c++17 -Wall -Wextra -I/tmp/w5/tangle -c /tmp/w5/tangle/weave.cpp
+```
+
+再往下是命令行那一篇的事：给它一个 `weave` 子命令、把 `tangle/book.yaml` 读进来、把页写到 `-o` 指的地方。等那条命令通了，这本书就能自己排自己——**同一份源，一条给编译器，一条给读者**。
