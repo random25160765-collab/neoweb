@@ -17,12 +17,12 @@ file<yaml> book @
 清单写成 chunk：人读它的样子，机器读它的行。
 
 << 目录表 >>= @
-	title: 文学编程
+	title: Neoweb
 	parts:
 	  - title: 序
 	    files:
-	      - book/skeleton.nw
 	      - book/menu.nw
+	      - book/skeleton.nw
 
 	  - title: 第 1 章 为什么是文学编程
 	    files:
@@ -55,6 +55,8 @@ file<yaml> book @
 	      - book/Chapter 5/2-render.nw
 	      - book/Chapter 5/3-book.nw
 	      - book/Chapter 5/4-site.nw
+	      - book/Chapter 5/5-enhance.nw
+	      - book/Chapter 5/6-md.nw
 
 	  - title: 第 6 章 协作
 	    files:

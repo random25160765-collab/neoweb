@@ -22,9 +22,20 @@ file<cpp> weave @
 	<< 左栏 >>
 	<< 上下章 >>
 	<< 目录页 >>
+	<< md 的路 >>
+	<< md 的一页 >>
 	<< 目录 >>
 	<< 一页 >>
+	<< 树的零件 >>
+	<< 命名空间树 >>
+	<< 文件树 >>
+	<< 两棵树 >>
+	<< 跑外部命令 >>
+	<< 图 >>
+	<< 公式 >>
+	<< 增强 >>
 	<< 铺开 >>
+	<< md 铺开 >>
 	<< weave 的尾 >>
 ~@
 
@@ -44,6 +55,10 @@ file<cpp> weave @
 	#include <srchilite/sourcehighlight.h>
 
 	#include <algorithm>
+	// 增强那一步要起了两个外部引擎：临时文件、popen、waitpid 都在这儿。
+	#include <cstdio>
+	#include <sys/wait.h>
+	#include <unistd.h>
 
 	namespace nw {
 	namespace {
@@ -208,10 +223,35 @@ cmark 给出的是一棵节点树。我们不做自己的 AST，直接把树走�
 `md_inline` 与 `md_block` 各占一条链，互相调用。它们的内容就是一张对照表：
 
 << 两种节点 >>= @
+	// 公式只做标记，不做排版：`$…$` 包一层 span，TeX 原样留在里面。
+	// 排版要一个 TeX 引擎，那是增强篇的事——这里多写一个字都会让它晚一步才看见。
+	void math_text(const string& s, std::ostringstream& out) {
+		size_t at = 0;
+		while (at < s.size()) {
+			size_t a = s.find('$', at);
+			if (a == string::npos) break;
+			if (a > 0 && s[a - 1] == '\\') {   // \$ 是美元符号，不是公式
+				out << html_escape(s.substr(at, a + 1 - at));
+				at = a + 1;
+				continue;
+			}
+			size_t b = s.find('$', a + 1);
+			if (b == string::npos) break;
+			out << html_escape(s.substr(at, a - at));
+			out << "<span class=\"math\">" << html_escape(s.substr(a, b + 1 - a)) << "</span>";
+			at = b + 1;
+		}
+		if (at < s.size()) out << html_escape(s.substr(at));
+	}
+
 	void md_inline(cmark_node* n, std::ostringstream& out) {
 		string t = cmark_node_get_type_string(n);
 		if (t == "text") {
-			out << html_escape(inert(cmark_node_get_literal(n)));
+			string s = inert(cmark_node_get_literal(n));
+			if (s.find('$') == string::npos)
+				out << html_escape(s);
+			else
+				math_text(s, out);
 			return;
 		}
 		if (t == "softbreak") { out << "\n"; return; }
@@ -238,9 +278,35 @@ cmark 给出的是一棵节点树。我们不做自己的 AST，直接把树走�
 		md_inlines(n, out);   // 不认识的容器：至少别丢内容
 	}
 
+	// 这一段的纯文字（跨 softbreak 也接上）：只用来判断"整段是不是一条公式"。
+	string literal_text(cmark_node* n) {
+		string s;
+		for (cmark_node* c = cmark_node_first_child(n); c; c = cmark_node_next(c)) {
+			string t = cmark_node_get_type_string(c);
+			if (t == "text" || t == "code")
+				s += inert(cmark_node_get_literal(c));
+			else if (t == "softbreak" || t == "linebreak")
+				s += "\n";
+			else
+				s += literal_text(c);
+		}
+		return s;
+	}
+
 	void md_block(cmark_node* n, std::ostringstream& out) {
 		string t = cmark_node_get_type_string(n);
-		if (t == "paragraph") { out << "<p>"; md_inlines(n, out); out << "</p>\n"; return; }
+		if (t == "paragraph") {
+			// 整段就是一条 $$…$$：块级公式，居中单排。
+			string raw = trim(literal_text(n));
+			if (raw.size() > 4 && has_prefix(raw, "$$") && raw.compare(raw.size() - 2, 2, "$$") == 0) {
+				out << "<div class=\"math-block\">" << html_escape(raw) << "</div>\n";
+				return;
+			}
+			out << "<p>";
+			md_inlines(n, out);
+			out << "</p>\n";
+			return;
+		}
 		if (t == "heading") {
 			int lv = cmark_node_get_heading_level(n);
 			if (lv < 1 || lv > 6) lv = 6;
@@ -267,6 +333,13 @@ cmark 给出的是一棵节点树。我们不做自己的 AST，直接把树走�
 			return;
 		}
 		if (t == "code_block") {
+			// 围栏的 info 只认第一个词：```dot 是图，其余都是例子。
+			const char* info = cmark_node_get_fence_info(n);
+			string fence = info ? info : "";
+			if (fence == "dot" || fence == "graphviz") {
+				out << "<pre class=\"dot\">" << html_escape(inert(cmark_node_get_literal(n))) << "</pre>\n";
+				return;
+			}
 			// 散文里的围栏是例子，不是产物：不着色，只要形状对。
 			out << "<pre class=\"sample\"><code>"
 			    << html_escape(inert(cmark_node_get_literal(n))) << "</code></pre>\n";

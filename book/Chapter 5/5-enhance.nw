@@ -1,0 +1,297 @@
+# 增强：公式与图
+
+前四篇排出来的页面已经能读，但有两样东西在页面上只是**原文**：`$…$` 里的公式，和 ```dot 围栏里的图。它们不是排版问题，是"我们这门语言没有引擎"的问题——TeX 要一个 TeX 排版器，DOT 要一个图布局器，两样都不该长在 `weave` 里。
+
+所以这一篇做的是**后处理**：weave 先老老实实把标记写进 HTML，再由这一步把标记换成真正的结果。步骤多了一层，换来的是三件事——渲染失败时读者还能看见自己写的那行源；两个引擎都是可选的，缺了不影响整页；以及**顺序**：只有等一页的全部标记都落齐，才谈得上"一次算完"。
+
+老读者会认出这是 v2 的 `enhance`。v3 重写时它跟着一起丢了，这一篇把它接回来。
+
+## 一、标记长什么样
+
+后处理要认的只有三种字面量，写死在两处：散文那一侧（`1-markdown`）写出来，这一侧认进去。
+
+```
+<pre class="dot">…</pre>
+<span class="math">$…$</span>
+<div class="math-block">$$…$$</div>
+```
+
+**定界符不剥掉。** `<span class="math">` 里留着 `$…$`：万一 KaTeX 不认这个式子，页面上显示的就是作者写下的那串 TeX，而不是一句"渲染失败"。信息在任何一步都不该比上一步少——这是整本书对降级的要求。
+
+## 二、跑一次外部命令
+
+两个引擎都是命令行程序，所以先要一个"喂进去、读回来"的函数。
+
+这里不用两根管道加手写 `fork`：`dot` 与 `node` 都是**先读完再吐**，临时文件足够，而两向管道一旦子进程先写满缓冲区就会互等，那个 bug 只在图特别大的时候出现。临时文件慢一点，但它不会在某个人的机器上偶发死锁。
+
+<< 跑外部命令 >>= @
+	// 把一次外部过滤接成函数：喂进临时文件，从管道读回来。
+	// 不用两根管道手写 fork：dot 与 node 都是"先读完再吐"，而两向管道
+	// 在子进程先写满缓冲区时会互等——那个 bug 只在图特别大时出现。
+	bool run_filter(const string& command, const string& input, string& out) {
+		char name[] = "/tmp/nw-enh-XXXXXX";
+		int fd = mkstemp(name);
+		if (fd < 0) return false;
+		bool ok = true;
+		size_t at = 0;
+		while (at < input.size()) {
+			ssize_t n = write(fd, input.data() + at, input.size() - at);
+			if (n <= 0) {
+				ok = false;
+				break;
+			}
+			at += static_cast<size_t>(n);
+		}
+		close(fd);
+		out.clear();
+		if (ok) {
+			string line = command + " < " + name;
+			FILE* p = popen(line.c_str(), "r");
+			if (!p) {
+				ok = false;
+			} else {
+				char buf[4096];
+				size_t n = 0;
+				while ((n = fread(buf, 1, sizeof buf, p)) > 0) out.append(buf, n);
+				ok = pclose(p) == 0;
+			}
+		}
+		std::remove(name);
+		return ok;
+	}
+~@
+
+`popen` 只给一个方向，所以输入走文件、输出走管道——一句话就够，不需要 `fork` 与 `dup2` 的四段样板。
+
+## 三、图：交给 dot
+
+一张图 = 一段 DOT 源。把它喂给 `dot -Tsvg`，取回 SVG，剥掉 XML 声明，嵌进页面。
+
+有一处必须做而容易忘：**同页两张图会给节点起一样的 id**。dot 不知道这一页还有别的图，两张图里的 `id="node1"` 撞在一起，第二张的箭头就会指到第一张的节点上——表现为"图二永远画不对"，而图二的源明明没写错。所以每张图的 `id="…"` 与 `url(#…)` 都加上 `g<序号>_` 前缀，两处都得加，只加一处等于没加。
+
+<< 图 >>= @
+	// 在 key 之后统一插一段前缀：id="x" → id="g0_x"，url(#x) → url(#g0_x)。
+	string prefix_after(const string& s, const string& key, const string& pre) {
+		string out;
+		size_t at = 0;
+		for (;;) {
+			size_t p = s.find(key, at);
+			if (p == string::npos) {
+				out += s.substr(at);
+				return out;
+			}
+			out += s.substr(at, p + key.size() - at);
+			out += pre;
+			at = p + key.size();
+		}
+	}
+
+	// 一张图：dot 出 SVG，只取 <svg> 那一段（XML 声明与生成器注释都丢掉）。
+	bool dot_svg(const string& src, int k, string& out) {
+		string text;
+		if (!run_filter("dot -Tsvg", src, text)) return false;
+		size_t a = text.find("<svg");
+		size_t b = text.rfind("</svg>");
+		if (a == string::npos || b == string::npos || b < a) return false;
+		string body = text.substr(a, b + 6 - a);
+		string pre = "g" + std::to_string(k) + "_";
+		body = prefix_after(body, "id=\"", pre);
+		body = prefix_after(body, "url(#", pre);
+		out = "<figure class=\"diagram\">" + body + "</figure>";
+		return true;
+	}
+~@
+
+`prefix_after` 用字符串扫描而不是正则：要改的只有两处字面前缀，`std::regex` 又慢又难读，为这两处不值得。
+
+图是**内联**的，不是 `<img src="x.svg">`：一份 HTML 双击就能看，不依赖旁边的文件，也不依赖服务。
+
+## 四、公式：交给 KaTeX，但要 MathML
+
+公式走 KaTeX，走它的 **MathML 输出**，不走默认的 HTML 输出。理由很硬：HTML 输出要配一份 CSS 和六十来个字体文件，一页就背上几兆，页面上到处是 `katex` 的类名；MathML 是浏览器原生认的标记，一个式子几百字节，页面仍然是**自包含的一份文件**。
+
+代价是排版细节跟着浏览器走，不再由 KaTeX 说了算。这个代价换来"拷到哪儿都能看"，值得。
+
+KaTeX 只在构建时用一次：它的 JS 在 `tangle/vendor/`（`make deps` 取的，不进仓库），`weave` 起一个 node 进程，把**这一页所有公式一次算完**。一个式子起一个进程，一页二十个式子就是二十次 `exec`——那是给自己找麻烦。
+
+<< 公式 >>= @
+	string html_unescape(const string& s) {
+		string out;
+		for (size_t i = 0; i < s.size(); ++i) {
+			if (s[i] != '&') {
+				out.push_back(s[i]);
+				continue;
+			}
+			if (s.compare(i, 4, "&lt;") == 0) { out += '<'; i += 3; }
+			else if (s.compare(i, 4, "&gt;") == 0) { out += '>'; i += 3; }
+			else if (s.compare(i, 5, "&amp;") == 0) { out += '&'; i += 4; }
+			else if (s.compare(i, 6, "&quot;") == 0) { out += '"'; i += 5; }
+			else if (s.compare(i, 5, "&#39;") == 0) { out += '\''; i += 4; }
+			else out.push_back(s[i]);
+		}
+		return out;
+	}
+
+	// 一条式子一行：\x02 是块级、\x03 是行内，\x01 分隔。MathML 里不会出现这三个字符，
+	// 所以不必在这一侧写一个 JSON 解析器。
+	static const char* KATEX_JS = R"JS(
+	// require 只把 "./" 开头的当路径，其余全当模块名去 node_modules 里找——
+	// 传进来的是一条普通路径，所以要先解析成绝对路径。
+	const katex = require(require("path").resolve(process.argv[2]));
+	let src = "";
+	process.stdin.on("data", (d) => (src += d));
+	process.stdin.on("end", () => {
+	  const parts = src.split("\x01");
+	  const out = parts.map((one) => {
+	    const display = one.charCodeAt(0) === 2;
+	    const tex = one.slice(1);
+	    try {
+	      return katex.renderToString(tex, { output: "mathml", displayMode: display, throwOnError: true });
+	    } catch (e) {
+	      return "";
+	    }
+	  });
+	  process.stdout.write(out.join("\x01"));
+	});
+	)JS";
+
+	struct MathItem {
+		string tex;
+		bool display = false;
+	};
+
+	// 一次进程算完一页的公式。返回 false 表示"这条路走不通"，调用方保留原文。
+	bool katex_many(const vector<MathItem>& items, vector<string>& out, const string& vendor) {
+		// 模板必须把 XXXXXX 留在最后：mkstemp 只认这个后缀，多一个 .js 就返回 -1，
+		// 而 -1 在这里的表现是"公式全都不渲染"，看起来像 KaTeX 不认那些式子。
+		char script[] = "/tmp/nw-katex-XXXXXX";
+		int fd = mkstemp(script);
+		if (fd < 0) return false;
+		string js = KATEX_JS;
+		bool ok = write(fd, js.data(), js.size()) == static_cast<ssize_t>(js.size());
+		close(fd);
+		if (!ok) {
+			std::remove(script);
+			return false;
+		}
+		string input;
+		for (size_t i = 0; i < items.size(); ++i) {
+			if (i) input.push_back('\x01');
+			input.push_back(items[i].display ? '\x02' : '\x03');
+			input += items[i].tex;
+		}
+		string text;
+		ok = run_filter("node '" + string(script) + "' '" + vendor + "'", input, text);
+		std::remove(script);
+		if (!ok) return false;
+		out.clear();
+		size_t at = 0;
+		for (;;) {
+			size_t sep = text.find('\x01', at);
+			out.push_back(text.substr(at, sep == string::npos ? string::npos : sep - at));
+			if (sep == string::npos) break;
+			at = sep + 1;
+		}
+		return out.size() == items.size();
+	}
+~@
+
+`html_unescape` 是必须的：`weave` 把 TeX 写进 HTML 时做了转义，喂给 KaTeX 之前要还原，否则 `x < y` 到了 KaTeX 手里成了 `x &lt; y`，它会当成关系符的三个字符去排版。
+
+**定界符要剥。** 标记里留着 `$`，喂给 KaTeX 之前必须剥掉：`$` 是这本书的定界符，在 KaTeX 眼里却是数学里的一个字符，不剥就会渲染成一个美元符号加一串错误。这也是"标记里保留原文"的代价——留着是为了失败时给人看，不是为了给引擎看。
+
+只认五个常见实体，认不出就原样留着——TeX 里出现奇怪实体时，宁可让 KaTeX 报错，也不要猜错。
+
+## 五、一次扫描，一次重建
+
+两处替换都是"开标记 … 闭标记"，而"非贪婪"在手写扫描里就是**闭标记取最近的那一个**。所以先把所有区间收集齐，再一遍重建字符串；每换一处就重建全文是 O(n·m)，一页几十个公式就是几十遍全页扫描。
+
+认不出就填回原文：一个写错的公式不该让整页变成一个空位。
+
+<< 增强 >>= @
+	struct Gap {
+		size_t a = 0;      // 开标记的起点
+		size_t b = 0;      // 闭标记的终点（开区间）
+		string html;       // 换成什么
+	};
+
+	// vendor 是 KaTeX 的目录（`tangle/vendor/katex`）。空着或不存在时，
+	// 公式那条路直接放弃——页面照旧，读者看到的是原始 TeX。
+	string enhance_page(const string& html, const string& vendor) {
+		vector<Gap> gaps;
+
+		// ---- 一、公式：行内与块级一起收，一次进程 ----
+		vector<MathItem> items;
+		vector<Gap> mgaps;
+		for (size_t at = 0; at < html.size();) {
+			size_t span = html.find("<span class=\"math\">", at);
+			size_t block = html.find("<div class=\"math-block\">", at);
+			bool is_block = block != string::npos && (span == string::npos || block < span);
+			size_t p = is_block ? block : span;
+			if (p == string::npos) break;
+			string open = is_block ? "<div class=\"math-block\">" : "<span class=\"math\">";
+			string close = is_block ? "</div>" : "</span>";
+			size_t a = p + open.size();
+			size_t b = html.find(close, a);
+			if (b == string::npos) break;
+			mgaps.push_back({p, b + close.size(), string()});
+			// KaTeX 吃的是纯 TeX：`$` 是这本书的定界符，到了它手里会被当成数学里的字符。
+			string tex = trim(html_unescape(html.substr(a, b - a)));
+			if (is_block) {
+				if (tex.size() > 4 && has_prefix(tex, "$$") && tex.compare(tex.size() - 2, 2, "$$") == 0)
+					tex = trim(tex.substr(2, tex.size() - 4));
+			} else if (tex.size() > 2 && tex[0] == '$' && tex.back() == '$') {
+				tex = trim(tex.substr(1, tex.size() - 2));
+			}
+			items.push_back({tex, is_block});
+			at = b + close.size();
+		}
+		vector<string> rendered;
+		if (!items.empty() && !vendor.empty() && katex_many(items, rendered, vendor)) {
+			for (size_t i = 0; i < mgaps.size(); ++i) {
+				if (rendered[i].empty()) continue;   // 这个式子 KaTeX 也不认：留原文
+				mgaps[i].html = items[i].display ? "<div class=\"math-block\">" + rendered[i] + "</div>"
+				                               : "<span class=\"math\">" + rendered[i] + "</span>";
+				gaps.push_back(mgaps[i]);
+			}
+		}
+
+		// ---- 二、图：一张一张来，编号就是 id 前缀 ----
+		int k = 0;
+		for (size_t at = 0; at < html.size();) {
+			const string open = "<pre class=\"dot\">";
+			size_t p = html.find(open, at);
+			if (p == string::npos) break;
+			size_t a = p + open.size();
+			size_t b = html.find("</pre>", a);
+			if (b == string::npos) break;
+			string svg;
+			if (dot_svg(html_unescape(html.substr(a, b - a)), k, svg)) {
+				gaps.push_back({p, b + 6, svg});
+				++k;
+			}
+			at = b + 6;
+		}
+
+		// ---- 三、按位置重排，一遍重建 ----
+		std::sort(gaps.begin(), gaps.end(), [](const Gap& x, const Gap& y) { return x.a < y.a; });
+		string out;
+		size_t cut = 0;
+		for (const Gap& g : gaps) {
+			if (g.a < cut) continue;   // 区间重叠（公式里有图？）：先到先得
+			out += html.substr(cut, g.a - cut);
+			out += g.html;
+			cut = g.b;
+		}
+		out += html.substr(cut);
+		return out;
+	}
+~@
+
+`vendor` 从 `book.yaml` 的位置推出来，不从"当前目录"推：`weave` 可以在任意目录被调用，而 `tangle/vendor` 与 `tangle/book.yaml` 的相对位置是固定的。
+
+## 六、这一篇往哪儿接
+
+四块砖都有名字了，但这一段代码**不自己开文件**：它落在 `weave.cpp` 里，接在 `<< 一页 >>` 之后、`<< 铺开 >>` 之前——顺序是硬要求，`enhance_page` 要在 `weave` 之前见过。头文件也在 `weave` 的头里统一加（`unistd.h`、`sys/wait.h`、`cstdio`），这一篇只管函数。
+
+真正的调用点在下一篇：`weave` 每写完一页，先过一遍这里，再落盘。

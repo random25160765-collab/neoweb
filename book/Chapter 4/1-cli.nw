@@ -41,12 +41,13 @@ file<cpp> main @
 	const char* usage() {
 		return "用法：\n"
 		       "  nw tangle [-o 目录] [-d|--debug] 篇...\n"
-		       "  nw weave  [-o 目录] [-b 目录文件] 篇...\n"
+		       "  nw weave  [-o 目录] [-b 目录文件] [-m|--markdown] 篇...\n"
 		       "  nw serve  [-p 端口] [目录]\n"
 		       "\n"
 		       "  -o 目录      产物写到哪里（默认当前目录）\n"
 		       "  -d, --debug  产物里插 #line，让编译错误指回 .nw\n"
 		       "  -b 文件      书的目录，由 menu 篇展开而来（默认 tangle/book.yaml）\n"
+		       "  -m, --markdown  weave 出 markdown（镜像书的目录），默认出 HTML\n"
 		       "  -p 端口      服务端口（默认 8080）\n";
 	}
 ~@
@@ -73,6 +74,7 @@ file<cpp> main @
 		string book = "tangle/book.yaml";
 		int port = 8080;
 		bool debug = false;
+		bool markdown = false;   // weave 的出口：默认 HTML，-m 换 markdown
 		vector<string> files;
 	};
 
@@ -107,6 +109,8 @@ file<cpp> main @
 				o.port = p;
 			} else if (a == "-d" || a == "--debug") {
 				o.debug = true;
+			} else if (a == "-m" || a == "--markdown") {
+				o.markdown = true;
 			} else if (!a.empty() && a[0] == '-') {
 				throw Error("nw", 0, "不认识的开关：" + a);
 			} else {
@@ -151,7 +155,7 @@ file<cpp> main @
 		if (o.files.empty()) throw Error("nw", 0, "weave 没有输入文件");
 		Document doc = load(o);
 		Book book = read_book(o.book);
-		int n = weave(doc, book, o.outdir);
+		int n = o.markdown ? weave_md(doc, book, o.outdir) : weave(doc, book, o.outdir);
 		std::cout << "写出 " << n << " 页\n";
 		return 0;
 	}

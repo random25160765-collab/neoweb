@@ -48,6 +48,10 @@ dir editor @
 	file<json> package;
 	file<json> language-configuration;
 	file<js> extension;
+	file<js> tokenize;
+	file<js> classify;
+	file<md> README;
+	file .vscodeignore;
 ~@
 
 dir snippets @
@@ -56,6 +60,7 @@ dir snippets @
 
 dir tools @
 	file<js> gen-grammar;
+	file<js> tokens;
 ~@
 
 dir icons @

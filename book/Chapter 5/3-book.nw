@@ -39,6 +39,7 @@ parts:
 	// 这几种行是我们自己定的，认得出、报得准，比"通用但错误信息空白"值。
 	Book read_book(const string& path) {
 		Book b;
+		b.file = path;   // 增强那一步靠它找 tangle/vendor
 		vector<string> lines = split_lines(read_file(path));
 		bool in_files = false;
 		for (size_t i = 0; i < lines.size(); ++i) {

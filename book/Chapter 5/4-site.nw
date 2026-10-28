@@ -2,7 +2,7 @@
 
 四个部件都在了：散文能变 HTML，块能成卡片，目录能读，身份能算。这一篇把它们接上，让 `weave` 真的写出文件。
 
-接线添六个名字：`<< 站点 >>`、`<< 左栏 >>`、`<< 上下章 >>`、`<< 目录页 >>`、`<< 一页 >>`、`<< 铺开 >>`。前五个都是"拼"，最后一个才写盘。
+接线添十个名字：`<< 站点 >>`、`<< 左栏 >>`、`<< 上下章 >>`、`<< 目录页 >>`、`<< 一页 >>`、`<< 树的零件 >>`、`<< 命名空间树 >>`、`<< 文件树 >>`、`<< 两棵树 >>`、`<< 铺开 >>`。前面九个都是"拼"，最后一个才写盘。
 
 ## 一、两张表
 
@@ -11,7 +11,7 @@
 所以表里存"块在哪一页、第几号"，**前缀按当前页现加**。
 
 << 站点 >>= @
-	// 一本书共用两张表：块落在哪些产物、块在哪一页第几号。
+	// 一本书共用四张表：块落在哪些产物、块在哪一页第几号、块定义在哪、块被引用几次。
 	// 锚点前缀按当前页现加：同页 #c-n，跨页 页名#c-n。
 	Ctx make_ctx(const Document& doc, const Book& book, const string& here) {
 		Ctx ctx;
@@ -28,6 +28,22 @@
 				ctx.href[kv.second[k]] = page == here ? anchor : page + ".html" + anchor;
 			}
 		}
+		// 定义位置与被引用次数也是整本书范围，一遍算齐。
+		// 引用计数**不去重**：同一块在两处被引两次，读者想知道的就是两次。
+		auto count = [&](const string& name, const vector<string>& ns, const string& file, int line) {
+			try {
+				ctx.uses[resolve(doc, name, ns, file, line)] += 1;
+			} catch (Error&) {
+			}
+		};
+		for (size_t i = 0; i < doc.chunks.size(); ++i) {
+			const Chunk& c = doc.chunks[i];
+			ctx.where[i] = slug(c.src_file) + " 第 " + std::to_string(c.line) + " 行";
+			for (const Line& ln : c.lines)
+				if (ln.kind == Line::Inst) count(ln.name, ln.ns, c.src_file, ln.no);
+		}
+		for (const auto& kv : doc.files)
+			for (const Inst& in : kv.second.body) count(in.name, in.ns, in.file, in.line);
 		return ctx;
 	}
 ~@
@@ -52,6 +68,9 @@
 				    << ".html\">" << html_escape(page_title(f)) << "</a>";
 			}
 		}
+		// 两棵树不是"篇"，但它们是整本书的两个视图，所以也得从每一页进得去。
+		out << "<div class=\"part" << (here == "tree" ? " here" : "") << "\">图</div>";
+		out << "<a href=\"tree.html#ns\">命名空间树</a><a href=\"tree.html#code\">文件树</a>";
 		return out.str();
 	}
 ~@
@@ -139,34 +158,245 @@
 
 就这么十几行。前四篇铺的砖都在这里各就各位——**这就是把东西拆成部件的回报：接起来的时候不需要再想什么**。
 
-## 六、铺开
+## 六、两棵树
 
-最后一步是写盘。规则只有三条：目录建出来、每篇一个文件、名字不许撞。
+一本书有两个空间，读者需要两个入口。**名字的空间**是 `!! x::` 与块名里的 `::` 分出来的层级；**盘上的空间**是 `top` 往下挂的目录、产物文件、文件直接接上的块。前者回答"这个项目有哪些部件"，后者回答"这一块会落进哪个文件"。两套图放在同一页，是因为它们是同一件事的两个坐标——翻来翻去只会让人记住两个地址。
+
+树都是纯 HTML 的嵌套列表，折叠交给 `<details>`/`<summary>`：没有脚本，没有布局引擎，打印出来是一棵缩进的树。
+
+<< 树的零件 >>= @
+	// 树的壳：有孩子就折得起来，没有就是一行。两棵树共用同一个壳——
+	// 折叠由浏览器自己管，页面上没有一行脚本。
+	// 有孩子的挂 `branch`：样式靠它把"组头"与"叶子"分开，不然整棵树像一列平铺的行。
+	string tree_shell(const string& head, const string& kids) {
+		if (kids.empty()) return "<li>" + head + "</li>\n";
+		return "<li class=\"branch\"><details open><summary>" + head + "</summary><ul class=\"tree\">" + kids +
+		       "</ul></details></li>\n";
+	}
+
+	// 一个块的写法：能链回正文就链，链不到（没进目录的篇）就只是一个灰名字。
+	// 名字后面那个 q- 号是它在整本书里的编号，两棵树靠它对上同一块。
+	// `shown` 是树里该印的那一截：命名空间树已经用节点表达了前缀，名字里再写一遍是重复。
+	string block_label(const Document& doc, const Ctx& ctx, size_t idx, const string& shown) {
+		string label = "&lt;&lt; " + html_escape(shown) + " &gt;&gt;";
+		auto h = ctx.href.find(idx);
+		if (h != ctx.href.end() && !h->second.empty())
+			return "<a href=\"" + html_escape(h->second) + "\" title=\"" +
+			       html_escape(chunk_tip(doc, ctx, idx)) + "\">" + label + "</a>";
+		return "<span class=\"block\">" + label + "</span>";
+	}
+
+	string block_label(const Document& doc, const Ctx& ctx, size_t idx) {
+		return block_label(doc, ctx, idx, doc.chunks[idx].name);
+	}
+
+	// 只印编号、不挂 id：同一块可以落进多个产物，id 重复了浏览器不知道该跳哪一个。
+	string block_leaf(const Document& doc, const Ctx& ctx, size_t idx) {
+		return "<li>" + block_label(doc, ctx, idx) + " <span class=\"qid\">q-" + std::to_string(idx) +
+		       "</span></li>\n";
+	}
+
+	string miss_leaf(const string& name) {
+		return "<li><span class=\"inst miss\">&lt;&lt; " + html_escape(name) + " &gt;&gt;</span></li>\n";
+	}
+~@
+
+这里只需要四样小东西：一个壳、一块的名字、一片叶子、一个坏名字。它们比任何一棵树活得久，所以单独成块。
+
+<< 命名空间树 >>= @
+	// 命名空间树：块名里的 `::` 本来就是一条路径，画出来就是树。
+	struct NsNode {
+		map<string, NsNode> kids;
+		vector<size_t> chunks;
+	};
+
+	// 名字按 `::` 切段。声明过但一块都没有的命名空间也要有节点：空的东西也是结构。
+	vector<string> ns_path(const string& name) {
+		vector<string> out;
+		size_t at = 0;
+		while (true) {
+			size_t sep = name.find("::", at);
+			if (sep == string::npos) break;
+			out.push_back(name.substr(at, sep - at));
+			at = sep + 2;
+		}
+		return out;
+	}
+
+	NsNode* ns_walk(NsNode& root, const vector<string>& path) {
+		NsNode* cur = &root;
+		for (const string& seg : path) cur = &cur->kids[seg];
+		return cur;
+	}
+
+	// 块的锚点用全书下标：一个块恰有一个叶子，所以 id 不会撞。
+	// 树里只印最后一段名字：`editor::清单` 挂在 `editor` 底下，前缀已经由节点说过了。
+	string ns_leaf(const Document& doc, const Ctx& ctx, size_t idx, const string& prefix) {
+		string shown = doc.chunks[idx].name;
+		string head = prefix.empty() ? string() : prefix + "::";
+		if (shown.compare(0, head.size(), head) == 0) shown = shown.substr(head.size());
+		std::ostringstream out;
+		out << "<li id=\"q-" << idx << "\">" << block_label(doc, ctx, idx, shown) << " <span class=\"qid\">q-"
+		    << idx << "</span>";
+		auto homes = ctx.homes.find(idx);
+		if (homes != ctx.homes.end())
+			for (const auto& p : homes->second) out << " <span class=\"home\">" << html_escape(p) << "</span>";
+		out << "</li>\n";
+		return out.str();
+	}
+
+	string ns_nodes(const Document& doc, const Ctx& ctx, const NsNode& n, const string& prefix) {
+		std::ostringstream out;
+		for (const auto& kv : n.kids) {
+			string full = prefix.empty() ? kv.first : prefix + "::" + kv.first;
+			string id;
+			for (char ch : full) id += ch == ':' ? '-' : ch;
+			out << tree_shell("<span class=\"ns\" id=\"ns-" + html_escape(id) + "\">" + html_escape(kv.first) +
+			                      "</span>",
+			                  ns_nodes(doc, ctx, kv.second, full));
+		}
+		for (size_t idx : n.chunks) out << ns_leaf(doc, ctx, idx, prefix);
+		return out.str();
+	}
+
+	NsNode ns_tree(const Document& doc) {
+		NsNode root;
+		for (const string& ns : doc.namespaces) ns_walk(root, ns_path(ns));
+		for (size_t i = 0; i < doc.chunks.size(); ++i)
+			ns_walk(root, ns_path(doc.chunks[i].name))->chunks.push_back(i);
+		return root;
+	}
+~@
+
+名字树的顺序是排序的（`map` 给的字典序），不是源文件顺序。这一处**不照源顺**：树是用来找东西的，按字母找比按"作者写到哪儿"找靠得住。文件树正相反，它照挂载顺序：tangle 先铺哪个目录、先写哪个文件，树上就按那个次序。两棵树各答一个问题，没有理由用同一种排法。正文的顺序仍然由源决定，三者互不干涉。
+
+块在名字树里**只有一个叶子**，所以 `q-<idx>` 这个 id 全书唯一——正文卡片右上角那个「图」就是靠它落回这里。文件树里同一块可能出现很多次（一个文件接上的块，别的文件也接），所以那里只印编号、不挂 id：编号说的是"这是同一块"，id 说的是"浏览器该滚到哪一个"，后一句在文件树里没有唯一答案。
+
+名字在树里只印最后一段：`editor::清单` 挂在 `editor` 底下，前缀已经由节点说过了。树把路径表达了一遍，名字里再抄一遍就是两处维护同一件事——写错一处，读者看不出哪处是对的。全名在 tooltip 里，要抄的时候指针停一下就有；真正要抄名字的地方是正文，不是树。
+
+<< 文件树 >>= @
+	// 文件树：tangle 真正要铺出来的那棵树。根是 top，中间是目录与产物文件，
+	// 叶子是文件直接接上的块——这正好是 parse 出来的那道结构，不是调用链。
+	struct FsNode {
+		struct Kid {
+			bool is_dir = false;
+			string label;   // 盘上的名字：目录名，或带后缀的文件名
+			string key;     // 目录名，或 files 的键
+		};
+		vector<Kid> kids;   // 按挂载顺序：tangle 就是照这个次序建目录、写文件
+		map<string, FsNode> sub;
+	};
+
+	// 判据与 tangle 一致：没写内容的文件不落盘，这里也就不画。
+	// 挂了但还没定义的目录照画：它是空的，不是不存在。
+	void fs_walk(const Document& doc, const DirNode& d, FsNode& n) {
+		for (const Mount& mt : d.mounts) {
+			if (mt.is_dir) {
+				n.kids.push_back(FsNode::Kid{true, mt.name, mt.name});
+				auto it = doc.dirs.find(mt.name);
+				if (it != doc.dirs.end()) fs_walk(doc, it->second, n.sub[mt.name]);
+				continue;
+			}
+			string key = file_key(mt.name, mt.type);
+			auto it = doc.files.find(key);
+			if (it == doc.files.end() || !it->second.defined) continue;
+			n.kids.push_back(FsNode::Kid{false, mt.type.empty() ? mt.name : mt.name + suffix_of(mt.type), key});
+		}
+	}
+
+	// 文件下面是它直接接上的块，到这儿就停：再往下是调用链，那件事正文里做过了，
+	// 而且更准——每一块的实例行都是链接。树管"在哪儿"，正文管"由什么组成"。
+	string fs_nodes(const Document& doc, const Ctx& ctx, const FsNode& n) {
+		std::ostringstream out;
+		for (const FsNode::Kid& k : n.kids) {
+			if (!k.is_dir) {
+				std::ostringstream lane;
+				for (const Inst& in : doc.files.at(k.key).body) {
+					try {
+						lane << block_leaf(doc, ctx, resolve(doc, in.name, in.ns, in.file, in.line));
+					} catch (Error&) {
+						lane << miss_leaf(in.name);
+					}
+				}
+				out << tree_shell("<span class=\"file\">" + html_escape(k.label) + "</span>", lane.str());
+				continue;
+			}
+			auto it = n.sub.find(k.key);
+			string kids = it == n.sub.end() ? string() : fs_nodes(doc, ctx, it->second);
+			out << tree_shell("<span class=\"dir\">" + html_escape(k.label) + "/</span>", kids);
+		}
+		return out.str();
+	}
+
+	// 根不写成 `top/`：盘上没有这个目录，它是"从这里开始铺"的那个入口。
+	string fs_tree(const Document& doc, const Ctx& ctx) {
+		auto top = doc.dirs.find("top");
+		if (top == doc.dirs.end()) return string();
+		FsNode root;
+		fs_walk(doc, top->second, root);
+		return tree_shell("<span class=\"dir\">top</span>", fs_nodes(doc, ctx, root));
+	}
+~@
+
+文件树的叶子停在块，不再往下展开。再展开一遍就是调用链，而调用链正文里已经做过，并且做得更准：每一块里的实例行都是链接，点进去就是那一块的定义。树要是把同一条链复述一遍，读者就得在两处维护同一个心智模型。**树负责"在哪儿"，正文负责"由什么组成"。**
+
+名字错在树里不报错，画一条划线的名字就完了：报错是 tangle 的事。渲染器少一个链接不该让整页塌掉——这和正文里那些空 `catch` 是同一条规矩。
+
+<< 两棵树 >>= @
+	// 两个视图一页装。树是页码之外的第二种坐标，读者要能从这里回到正文。
+	string tree_html(const Document& doc, const Book& book) {
+		Ctx ctx = make_ctx(doc, book, "tree");
+		NsNode root = ns_tree(doc);
+		std::ostringstream out;
+		out << "<h1>两棵树</h1>\n<p class=\"lead\">第一棵是名字的空间，第二棵是盘上的空间。"
+		    << "同一块在两棵树里用同一个 q- 号；名字都能点回正文，正文卡片右上角的「图」跳回这里。</p>\n";
+		out << "<h2 id=\"ns\">命名空间树</h2>\n<p class=\"lead\">节点是命名空间，叶子是块。"
+		    << "没有命名空间的块挂在根上；声明过但一块都没有的命名空间也留着——空的东西也是结构。</p>\n";
+		out << "<ul class=\"tree\">" << ns_nodes(doc, ctx, root, "") << "</ul>\n";
+		out << "<h2 id=\"code\">文件树</h2>\n<p class=\"lead\">tangle 要铺出来的那棵：根是 top，往下是目录与产物文件，"
+		    << "文件下面直接接上的块。空目录留着，没写内容的文件不画——它不落盘。</p>\n";
+		out << "<ul class=\"tree\">" << fs_tree(doc, ctx) << "</ul>\n";
+		return out.str();
+	}
+~@
+
+`make_ctx(doc, book, "tree")` 里的 `"tree"` 不是页名，是"没有哪一块住在这里"——于是每个链接都带上页名前缀，从树里点回任意一篇都是 `1-types.html#c-3` 这种完整地址。同页锚点那条捷径在这里一次也用不上，这正是它该有的样子。
+
+## 七、铺开
+
+最后一步是写盘。规则只有三条：目录建出来、每篇一个文件、名字不许撞；此外整本书还多两张不属于任何篇的页——目录页与两棵树。
 
 << 铺开 >>= @
-	// 铺开：目录建好，每篇一个文件，最后补一张目录页。
+	// 铺开：目录建好，每篇一个文件，最后补目录页与两棵树。
+	// 每一页落盘之前先过一遍增强：公式与图在那一刻才变成真正的标记。
 	int weave(const Document& doc, const Book& book, const string& outdir) {
 		if (book.parts.empty()) throw Error(doc.main_file, 0, "目录是空的：没有一篇可写");
 		std::filesystem::create_directories(outdir);
+		string vendor = dir_of(book.file) + "/vendor/katex";
 		set<string> used;
 		int n = 0;
 		for (const string& src : book.order) {
 			string name = slug(src);
 			if (!used.insert(name).second)
 				throw Error(src, 0, "两篇会写成同一个文件：" + name + ".html");
-			write_file(outdir + "/" + name + ".html", page_html(doc, book, src));
+			write_file(outdir + "/" + name + ".html", enhance_page(page_html(doc, book, src), vendor));
 			++n;
 		}
-		write_file(outdir + "/index.html", page_shell(book.title, nav_html(book, ""), index_html(book)));
-		return n + 1;
+		write_file(outdir + "/index.html",
+		           enhance_page(page_shell(book.title, nav_html(book, ""), index_html(book)), vendor));
+		write_file(outdir + "/tree.html",
+		           enhance_page(page_shell("两棵树", nav_html(book, "tree"), tree_html(doc, book)), vendor));
+		return n + 2;
 	}
 ~@
 
-返回"写了几页"，和 `tangle` 返回"写了几个文件"是同一个约定：调用方要用它区分"什么都没写"与"写了三十页"，让它自己数就会和实现慢慢对不上。
+返回"写了几页"，和 `tangle` 返回"写了几个文件"是同一个约定：调用方要用它区分"什么都没写"与"写了三十页"，让它自己数就会和实现慢慢对不上。数是 `n + 2` 而不是 `n + 1`：目录页与两棵树都是整本书的，不挂在任何一篇下面，但它们确实落到了盘上——少算一张就等于对读者说这本书只有三十四页。
+
+`tree.html` 这个名字不进 `used` 检查：它不来自篇，也就不会与篇撞车；真要撞，撞的是一个写死的位置，改名字比报错快。
 
 `used` 这个集合是**唯一**一处重复命名检查。`slug` 只取基名，撞车是迟早的事（同一本书里 `Chapter 2/2-types.nw` 与 `Chapter 3/2-types.nw` 都会变成 `2-types.html`），而这类错误若拖到写盘，只会得到一个文件静默覆盖另一个——页面上少一章，构建日志里什么都没有。
 
-## 七、跑起来
+## 八、跑起来
 
 到这一篇为止，weave 的四个部件接齐了，临时豁免取消：
 

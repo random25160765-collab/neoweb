@@ -144,6 +144,7 @@ v2 靠字符串前缀（`\x01`、`\x02`）在文本里打标记，展开时再�
 		string title;
 		vector<Part> parts;
 		vector<string> order;   // 展平：阅读顺序上的篇路径
+		string file;            // 目录来自哪个文件：vendor 之类的东西跟着它定位
 	};
 
 	// 整份文档：一张表 + 一棵树。
@@ -224,6 +225,8 @@ v2 靠字符串前缀（`\x01`、`\x02`）在文本里打标记，展开时再�
 	// 一页 = 一份源。doc 里有全部篇的块，这里只取 src 那一篇。
 	string page_html(const Document& doc, const Book& book, const string& src);
 	int weave(const Document& doc, const Book& book, const string& outdir);
+	// 第二个出口：同一份源排成 markdown，镜像书的目录。
+	int weave_md(const Document& doc, const Book& book, const string& outdir);
 
 	// ---- 站点（serve.cpp）----
 	// root 是已经铺好的那本 HTML；serve 不改一个字节。

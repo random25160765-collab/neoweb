@@ -1,8 +1,9 @@
-# 源（入库）：book/、nw3.py、Makefile、README.md、LICENSE、docs/、assets/、.github/
+# 源（入库）：book/、nw3.py、Makefile、README.md、README-zh.md、LICENSE、docs/、assets/、.github/
 # 其余是产物或临时物：留着就是同一个事实的两份，而两份迟早不一致。
 
 tangle/
 weave/
+weave-md/
 
 # "已铺"的构建记号
 .tangle-stamp

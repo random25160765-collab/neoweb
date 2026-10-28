@@ -1,0 +1,169 @@
+# 第二个出口：Markdown
+
+同一份源，除了排成网页，还要能搬出去一份**文字版**：交给别的编辑器、交给 issue、交给一个不想开浏览器的评审。v2 有这条路，v3 重写时丢了，这一篇接回来。
+
+它不是"把 HTML 反着转回去"。HTML 那一侧为了排版做了很多加工——着色、锚点、卡片、两棵树——这些在 markdown 里全是噪音。这一篇做的是**另一条路径**：散文照原文抄，块展开成围栏，接线也展开成围栏，除此之外什么都不加。
+
+所以 markdown 版**没有**公式渲染、没有 dot 图、没有语义着色。理由不是省事，是它本来就是**源稿形态**：拿到这份 markdown 的人要读的是"作者写了什么"，而不是"浏览器把它画成了什么"。
+
+## 一、布局：镜像书，不镜像站点
+
+网页版把页铺平在根目录——`1-types.html`、`3-parse.html`，url 是给人念的地址。markdown 版不学它：把书的目录原样搬过来，`Chapter 3/1-types.md`、`Chapter 5/2-render.md`。
+
+一眼看得出文件是谁的，也方便整章整章地搬走。路径从源路径来：剥掉开头的 `book/`，后缀换成 `.md`，其余一概不动。
+
+<< md 的路 >>= @
+	// 目录名：`tangle/book.yaml` → `tangle`。vendor 与镜像目录都跟着它走，不跟着当前目录走。
+	string dir_of(const string& path) {
+		size_t slash = path.find_last_of("/\\");
+		return slash == string::npos ? string() : path.substr(0, slash);
+	}
+
+	// 源路径 → markdown 相对路径：剥掉开头的 book/，.nw 换成 .md。
+	string md_path(const string& src) {
+		string p = src;
+		if (has_prefix(p, "book/")) p = p.substr(5);
+		if (p.size() > 3 && p.compare(p.size() - 3, 3, ".nw") == 0) p = p.substr(0, p.size() - 3) + ".md";
+		return p;
+	}
+
+	vector<string> path_parts(const string& p) {
+		vector<string> out;
+		size_t at = 0;
+		while (at < p.size()) {
+			size_t sep = p.find('/', at);
+			if (sep == string::npos) {
+				out.push_back(p.substr(at));
+				break;
+			}
+			if (sep > at) out.push_back(p.substr(at, sep - at));
+			at = sep + 1;
+		}
+		return out;
+	}
+
+	// 相对链接：逐段对齐公共前缀，from 这边多出的每段退一级，to 的剩余段顺路下去。
+	// 目录一深，链接就得讲相对路径——这是 markdown 与 HTML 最不一样的地方：
+	// HTML 里所有页都在根上，markdown 里每页都在自己的章目录里。
+	string md_rel(const string& from_dir, const string& to) {
+		vector<string> a = path_parts(from_dir);
+		vector<string> b = path_parts(to);
+		size_t i = 0;
+		while (i < a.size() && i + 1 < b.size() && a[i] == b[i]) ++i;   // 最后一段是文件名，不参与对齐
+		string out;
+		for (size_t k = i; k < a.size(); ++k) out += "../";
+		for (size_t k = i; k < b.size(); ++k) out += (k > i ? "/" : "") + b[k];
+		return out.empty() ? string("./") : out;
+	}
+~@
+
+## 二、一页
+
+一页 markdown = 散文原样 + 块成围栏 + 页脚一条导航。
+
+块的头一行写成 `#### << 名字 >>`：不加这一行，读者只看到一段代码，不知道它在源里叫什么；而名字是这份文档里唯一能跨页对齐的坐标。
+
+围栏的语言标记从产物路径推——`tangle/parse.cpp` 就给 `cpp`。给对了，GitHub 与多数编辑器都会着色；给错了也不致命，最坏是不上色。
+
+<< md 的一页 >>= @
+	string md_page(const Document& doc, const Book& book, const string& src) {
+		string rel = md_path(src);
+		string dir = dir_of(rel);
+		Ctx ctx;
+		ctx.homes = chunk_homes(doc);
+		std::ostringstream out;
+		for (const Piece& p : read_source(doc, src)) {
+			if (p.kind == Piece::Chunk) {
+				const Chunk& c = doc.chunks[p.idx];
+				out << "#### `<< " << c.name << " >>`\n\n```" << chunk_lang(ctx, p.idx) << "\n";
+				for (const Line& ln : c.lines) {
+					if (ln.kind == Line::Inst)
+						out << ln.indent << "<< " << ln.name << " >>";
+					else
+						out << ln.text;
+					out << "\n";
+				}
+				out << "```\n\n";
+			} else if (p.kind == Piece::Wire) {
+				// 接线在 markdown 里没有第二种身份：它就是一段要给人看的原文。
+				out << "```text\n";
+				for (const string& l : p.lines) out << l << "\n";
+				out << "```\n\n";
+			} else {
+				for (const string& l : p.lines) out << l << "\n";
+				out << "\n";
+			}
+		}
+		// 页脚：markdown 没有左栏，只有这一条。头尾各自留空，不画灰按钮。
+		string line;
+		for (size_t i = 0; i < book.order.size(); ++i) {
+			if (book.order[i] != src) continue;
+			if (i > 0)
+				line += "[← " + page_title(book.order[i - 1]) + "](" + md_rel(dir, md_path(book.order[i - 1])) + ") · ";
+			line += "[目录](" + md_rel(dir, "index.md") + ")";
+			if (i + 1 < book.order.size())
+				line += " · [" + page_title(book.order[i + 1]) + " →](" + md_rel(dir, md_path(book.order[i + 1])) + ")";
+			break;
+		}
+		out << "---\n\n" << line << "\n";
+		return out.str();
+	}
+~@
+
+## 三、目录页与铺开
+
+目录页在根上：部名成小标题，篇名成条目。链接是相对根目录的，所以直接写 `Chapter 3/1-types.md`，不必过 `md_rel`。
+
+铺开时每篇先建自己的目录——`write_file` 不会替你建父目录，`Chapter 3/1-types.md` 落到一个不存在的 `Chapter 3/` 里就是一个静默失败。
+
+<< md 铺开 >>= @
+	string md_index(const Book& book) {
+		std::ostringstream out;
+		out << "# " << (book.title.empty() ? string("目录") : book.title) << "\n\n";
+		for (const Part& p : book.parts) {
+			out << "## " << p.title << "\n\n";
+			for (const string& f : p.files) out << "- [" << page_title(f) << "](" << md_path(f) << ")\n";
+			out << "\n";
+		}
+		return out.str();
+	}
+
+	// 铺开 markdown 版：镜像目录、每篇一个文件、最后补目录页。
+	int weave_md(const Document& doc, const Book& book, const string& outdir) {
+		if (book.parts.empty()) throw Error(doc.main_file, 0, "目录是空的：没有一篇可写");
+		std::filesystem::create_directories(outdir);
+		set<string> used;
+		int n = 0;
+		for (const string& src : book.order) {
+			string rel = md_path(src);
+			if (!used.insert(rel).second) throw Error(src, 0, "两篇会写成同一个文件：" + rel);
+			string full = outdir + "/" + rel;
+			std::filesystem::create_directories(dir_of(full));
+			write_file(full, md_page(doc, book, src));
+			++n;
+		}
+		write_file(outdir + "/index.md", md_index(book));
+		return n + 1;
+	}
+~@
+
+重复命名检查这一版比 HTML 版更宽：`md_path` 带目录，撞车只会在"同一个源路径写两次"时发生——那本来就是调用方传重了，早报比晚覆盖好。
+
+两个后端共用 `read_source` 与 `Piece`，不共用 `page_shell`：一个的出入口是"一份能双击打开的 HTML"，另一个是"一份能贴进 issue 的文本"。共用越少，两边的规矩越不会互相污染。
+
+## 四、命令行
+
+`weave` 多一个开关，别的不动：
+
+```
+nw weave --markdown -o /tmp/md 篇...
+```
+
+默认仍然是 HTML。为什么把 markdown 做成开关而不是另一个子命令：两条路的输入完全一样（同一份源、同一份目录），差别只在出口；拆成两个子命令，`-b`、`-o`、篇的列表都得各写一遍。
+
+`make web` 只出 HTML；markdown 那一路要显式要。
+
+```
+make web                             # weave/*.html
+./tangle/build/nw weave --markdown -o weave-md $(find book -name '*.nw')   # weave-md/**/*.md
+```

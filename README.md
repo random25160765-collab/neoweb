@@ -1,12 +1,14 @@
 # neoweb
 
-AI 时代重做文学编程：一份 `.nw` 源，tangle 出可编译的源码，weave 出你正在读的页面。
+Literate programming rebuilt for the age of AI: one `.nw` source, `tangle` for compilable code, `weave` for the page you are reading.
 
-这本书本身就是这个工具——`book/` 里的每一篇既是章节，也是 `tangle/` 下源码的来源。
+The book *is* the tool — every file under `book/` is a chapter and, at the same time, the source of a file under `tangle/`.
 
-## 依赖
+**中文版：[README-zh.md](README-zh.md)**
 
-Ubuntu / Debian：
+## Requirements
+
+Ubuntu / Debian:
 
 ```sh
 sudo apt-get install build-essential pkg-config \
@@ -14,61 +16,72 @@ sudo apt-get install build-essential pkg-config \
   libsource-highlight-dev python3
 ```
 
-macOS：
+macOS:
 
 ```sh
 brew install pkg-config cmark-gfm source-highlight
 ```
 
-`libcmark-gfm` 是硬依赖：没有它就没有散文。`source-highlight` 是软依赖：缺了它页面照出，只是代码块不着色。编辑器插件只用 Node 跑一次语法生成，不装 npm 依赖。
+`libcmark-gfm` is required — without it there is no prose. `source-highlight` is optional: pages still render, code just loses its colours. `graphviz` and KaTeX (fetched by `make deps`) are optional too: without them `dot` fences and `$…$` math stay on the page as source text, and nothing else breaks.
 
-## 快速开始
+## Quick start
 
 ```sh
 git clone https://github.com/random25160765-collab/neoweb.git
 cd neoweb
-make              # 铺出 tangle/，编译出 tangle/build/nw
-make web          # 渲染整站到 weave/
-make serve        # 本地预览，默认 http://127.0.0.1:8080
+make              # expand tangle/, build tangle/build/nw
+make web          # render the whole book into weave/
+make serve        # preview at http://127.0.0.1:8080
 ```
 
-克隆下来直接 `make` 就行。仓库根那份手写 `Makefile` 只做三件事：找源、第一次用破点铺出 `tangle/Makefile`、把目标转发过去；真正的规则在 `tangle/Makefile` 里。
+`make` on a fresh clone is all you need. The hand-written `Makefile` at the repo root does exactly three things: find the sources, bootstrap `tangle/Makefile` with the Python port on first run, and forward every target. The real rules live in `tangle/Makefile`, which is itself a product of the book.
 
-## 命令
+## Commands
 
-| 命令 | 做什么 |
+| Command | What it does |
 |---|---|
-| `make` | tangle 全书 → 编译 `tangle/build/nw` |
-| `make check` | 只查源：重复实现、未实现的引用、挂载冲突、不可达的块 |
-| `make test` | 破点的用例（27 个语法与 tangle 用例） |
-| `make web` | 把每一篇渲成一页 HTML，按 `tangle/book.yaml` 排目录与上下章 |
-| `make serve` | 起一个静态服务器预览 `weave/` |
-| `make crosscheck` | 用破点重铺一遍，与自举产物逐字节比对 |
-| `make clean` | 删掉全部产物（`tangle/`、`weave/`） |
+| `make` | tangle the book, then compile `tangle/build/nw` |
+| `make check` | source checks only: duplicate definitions, unresolvable references, mount conflicts, unreachable chunks |
+| `make test` | the Python port's test suite (27 syntax and tangle cases) |
+| `make web` | render one HTML page per chapter, ordered by `tangle/book.yaml` |
+| `make md` | export the same source as Markdown, mirroring the book's directory layout |
+| `make serve` | kill any running preview, then serve `weave/` (another port: `make serve PORT=8081`) |
+| `make crosscheck` | re-expand with the Python port and diff byte-for-byte against the self-hosted output |
+| `make deps` | install the editor plugin's three Node packages and fetch KaTeX into `tangle/vendor/` |
+| `make ext` | symlink the plugin into your extensions directory (dev install) |
+| `make vsix` | package the plugin as `tangle/nw-<version>.vsix` |
+| `make clean` | remove all build products (`tangle/`, `weave/`, `weave-md/`) |
 
-## 仓库里有什么
-
-```
-book/            源：散文 + 语法 + 实现，全部由人写
-nw3.py           破点：只做 tangle 的 Python 实现，负责第一次
-Makefile         手写元层：找源、首次 bootstrap、转发
-tangle/          产物：源码、book.yaml、Makefile、examples/、editor/、build/nw
-weave/           产物：HTML
-docs/            设计笔记，不参与构建
-```
-
-**生成的都在 `tangle/` 下，仓库根只放手写的**——`ls` 一眼就能分出哪些是写的、哪些是铺的。`tangle/` 里的东西不要手改：它们由 `book/*.nw` 展开，改源才有效。
-
-## 编辑器插件
+Behind a mainland-China mirror, point npm somewhere reachable:
 
 ```sh
-make
-node tangle/editor/tools/gen-grammar.js                    # 写出语法文件
-ln -s "$PWD/tangle/editor" ~/.vscode/extensions/neoweb.nw  # 装成扩展目录
+make deps NPMFLAGS=--registry=https://registry.npmmirror.com
 ```
 
-重启窗口后，`.nw` 文件会有语法着色、语言配置与片段。插件只看着色，不做 tangle、不做跳转——那些交给 `tangle/build/nw` 本身。
+## What is in the repo
 
-## 许可
+```
+book/            source: prose, grammar and implementation, all hand-written
+nw3.py           bootstrap: a tangle-only Python port, used for the first run
+Makefile         hand-written meta layer: find sources, bootstrap once, forward
+tangle/          products: sources, book.yaml, Makefile, examples/, editor/, build/nw
+weave/           products: HTML (one page per chapter + index.html + tree.html)
+weave-md/        products: Markdown, mirroring the book's directory layout
+docs/            design notes, not part of the build
+```
 
-GPL-3.0-or-later，见 `LICENSE`。
+**Everything generated lives under `tangle/`; the repo root holds only hand-written files** — `ls` tells you which is which. Never edit `tangle/` by hand: it is expanded from `book/*.nw`, so the source is the only place where a change sticks.
+
+## Editor plugin
+
+```sh
+make vsix                                                        # build the package
+make ext                                                         # or: symlink it straight in
+make ext VSCODE=$HOME/.vscode-server/extensions                  # remote/server install
+```
+
+The plugin only colours and completes; tangling and navigation belong to `tangle/build/nw` itself.
+
+## License
+
+GPL-3.0-or-later, see `LICENSE`.

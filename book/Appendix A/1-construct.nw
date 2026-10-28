@@ -75,7 +75,9 @@ make crosscheck
 
 它做的是：用破点重新铺一遍到临时目录，与工作区的 `tangle/` 逐字节比对。
 
-比对时要排除两样东西：`build/`（编译产物，破点不会编译）与 `syntaxes/`（`gen-grammar.js` 的产物，破点不会跑 Node）。它们不是 tangle 的输出，而是 tangle 输出的下游——**下游不该参与上游的对账**，否则每次比对都会因为"二进制不一样"而红，而那个红没有任何信息量。
+比对时要排除几样东西：`build/`（编译器写的）、`syntaxes/`（`gen-grammar.js` 写的）、`node_modules/` 与 `package-lock.json`（`npm` 写的）、`vendor/`（`make deps` 取来的 KaTeX，连 npm 都不是）、`icons/icon.png` 与 `LICENSE`（构建从仓库根拷的）、`*.vsix`（`vsce` 打的）。它们不是 tangle 的输出，而是 tangle 输出的下游——**下游不该参与上游的对账**，否则每次比对都会因为"二进制不一样"而红，而那个红没有任何信息量。
+
+排除名单会长，这不是漏洞而是判据在起作用：每多一条，都对应一件 tangle 不负责的事。反过来说，`tangle/` 里只要出现一条绕过 tangle 生成的文件，这条命令就该知道。
 
 这防的不是"自举失败"——自举失败会当场报错。它防的是**破点悄悄僵化**：语法的某一处改了，`nw` 改了，`nw3.py` 忘了。那时 `make` 依然能过（因为用的是 `nw`），只有下一次从零开始的人会撞上。这种事在自举系统里几乎必然发生一次，所以它得有一条命令守着。
 
@@ -100,8 +102,21 @@ make crosscheck
 	# 二进制是 tangle 产物的下游，跟着产物一起放在 tangle/ 下。
 	NW       := tangle/build/nw
 	BOOT     := python3 nw3.py
+	# 端口是这台机器的状态，不是这本书的属性：8080 被别的服务占着是常态，
+	# 所以做成可覆盖的，而不是改一行再改回来。
+	PORT     ?= 8080
+	# 插件（附录 C）铺在 tangle/editor/。它在骨架里，所以内容是 tangle 写的；
+	# 但它要的两样东西不在里面——node_modules 是别人的代码，语法文件是生成器的产物。
+	EDITOR   := tangle/editor
+	# 扩展目录因"哪个编辑器"而异：VS Code 用 ~/.vscode/extensions，远程/网页版
+	# 用各自的 server 目录。默认给本地那个，换个编辑器就在命令行上覆盖：
+	#   make ext VSCODE=$HOME/.codebuddy-server-cn/extensions
+	VSCODE   ?= $(HOME)/.vscode/extensions
+	# 扩展目录名与包名都带版本，而版本在清单里只有一份。现读，不在这里再抄一份：
+	# 抄了就等着哪次发版只改了一处。用 = 而不是 :=，读的时候产物已经铺好了。
+	VERSION   = $(shell node -p "require('./$(EDITOR)/package.json').version")
 
-	.PHONY: all check test web serve crosscheck clean
+	.PHONY: all check test web md serve deps ext vsix crosscheck clean
 
 	all: $(NW)
 
@@ -128,18 +143,78 @@ make crosscheck
 	web: $(NW)
 		@$(NW) weave -b tangle/book.yaml -o weave $(SRC)
 
+	# 第二个出口：markdown 版镜像书的目录，给离线评审、贴进 issue、拿去做别的东西。
+	# 它不跑增强（公式与图在 markdown 里就是原文），所以也不需要 vendor。
+	md: $(NW)
+		@$(NW) weave --markdown -b tangle/book.yaml -o weave-md $(SRC)
+
+	# 端口被占是常态：上一轮的预览还开着，或者别的服务。所以先让开再起。
+	# `[n]w serve` 这个写法是为了不匹配到执行它的那个 shell 自己的命令行——
+	# 直接写 "nw serve"，pkill 会把自己连锅端掉，表现是 make 悄无声息地死了。
+	# 占着端口的若不是我们的 nw，再按端口清一次：这一条有代价，真拿这个端口跑
+	# 别的服务，它也会被杀掉。端口是显式的，就别混用。
 	serve: web
-		@$(NW) serve weave
+		@-pkill -f "[n]w serve" >/dev/null 2>&1 || true
+		@sleep 0.3
+		@-command -v fuser >/dev/null 2>&1 && fuser -k $(PORT)/tcp >/dev/null 2>&1 || true
+		@sleep 0.2
+		@$(NW) serve -p $(PORT) weave
+
+	# npm 的源因机器而异：国内镜像、公司私服、代理都算。这里不替人挑一个，
+	# 要换就在命令行上给：make deps NPMFLAGS=--registry=https://registry.npmmirror.com
+	NPMFLAGS ?=
+
+	# KaTeX 只要它那份 JS：公式走 MathML，不需要 CSS 与六十个字体文件。
+	# 不装进系统（apt 的 katex 会连带换掉 node），也不进仓库——它只在构建时用一次。
+	# 变量必须写在 deps 之前：prereq 里的 $(KATEX) 是**读规则时**展开的，
+	# 写在后头就是个空字符串，deps 会静默地少一个依赖。
+	KATEX    := tangle/vendor/katex
+
+	$(KATEX): | .tangle-stamp
+		@mkdir -p tangle/vendor
+		@cd tangle/vendor && npm pack katex --silent $(NPMFLAGS) >/dev/null && \
+		  tar xzf katex-*.tgz && mv package katex && rm -f katex-*.tgz
+		@echo "  KATEX $(KATEX)"
+
+	# 块体着色要三个 Node 包。node_modules 不是这个仓库的东西，也不该是：
+	# 靠 npm 拿，靠 --prefix 落在插件目录里——vsce 打包时只认插件目录里的那一份。
+	deps: $(KATEX) | .tangle-stamp
+		npm install --prefix $(EDITOR) --no-audit --no-fund $(NPMFLAGS)
+
+	# 包里必须有的两份"仓库级事实"：商店图标与 LICENSE。tangle 只写挂进骨架的文件，
+	# 所以它们由构建从仓库根拷——副本，不是第二份真相。
+	$(EDITOR)/icons/icon.png: assets/icon.png | .tangle-stamp
+		@cp $< $@
+
+	$(EDITOR)/LICENSE: LICENSE | .tangle-stamp
+		@cp $< $@
+
+	# 开发时装法：把目录软链进扩展位置。名字是 <publisher>.<name>-<version>，
+	# 三样都得与清单一致；错一处就成了另一个扩展——旧的那份还在，新的不生效，
+	# 表现是"改了没反应"，最难查的一种。
+	ext: $(EDITOR)/icons/icon.png $(EDITOR)/LICENSE | .tangle-stamp
+		@mkdir -p $(VSCODE)
+		@ln -sfn $(CURDIR)/$(EDITOR) $(VSCODE)/random25160765-collab.nw-$(VERSION)
+
+	# 出安装包。依赖与语法都得在场：缺依赖，装到别人机器上块体着色是关的；
+	# 缺语法，连高亮都没有，而这两样恰恰都不由 tangle 管。
+	vsix: deps $(EDITOR)/icons/icon.png $(EDITOR)/LICENSE
+		@test -f $(EDITOR)/syntaxes/nw.tmLanguage.json || \
+		  { echo "缺 $(EDITOR)/syntaxes/nw.tmLanguage.json：先跑 node $(EDITOR)/tools/gen-grammar.js"; exit 1; }
+		cd $(EDITOR) && npx --yes @vscode/vsce package --out ../nw-$(VERSION).vsix
 
 	# 破点与自举的产物逐字节相同：否则"哪一份才是对的"就没人答得上来。
-	# 排除的是下游：编译出的 build/ 与 Node 生成的 syntaxes/，破点都不产出。
+	# 排除的是下游：编译出的 build/、Node 生成的 syntaxes/、npm 写的 node_modules 与
+	# package-lock.json、构建拷进来的图标与 LICENSE、打出来的 .vsix——破点一样都不产出。
 	crosscheck: $(NW)
 		@rm -rf /tmp/nw-boot
 		@$(BOOT) tangle -o /tmp/nw-boot $(SRC) > /dev/null
-		@diff -r -x build -x syntaxes tangle /tmp/nw-boot && echo "crosscheck ok：破点与自举的产物一致"
+		@diff -r -x build -x syntaxes -x node_modules -x package-lock.json \
+		  -x icon.png -x LICENSE -x '*.vsix' -x vendor \
+		  tangle /tmp/nw-boot && echo "crosscheck ok：破点与自举的产物一致"
 
 	clean:
-		rm -rf tangle weave .tangle-stamp /tmp/nw-boot
+		rm -rf tangle weave weave-md .tangle-stamp /tmp/nw-boot
 ~@
 
 `sed 's/ /\\ /g'` 里那两个反斜杠是两个语言两层的事：`sed` 要一个反斜杠，写成 `\\`；而这段文字在 `$(shell …)` 里，交给 sh 之前不经 `make` 的转义。写错一层的表现是路径里多出一个反斜杠，`find` 找不到文件——报错会指向一行看起来完全正确的路径。
@@ -148,13 +223,30 @@ make crosscheck
 
 **这里没有 `install`**：装到 `PATH` 是每个用的人自己的事，一条 `ln -s` 就够了，把它写进 Makefile 只多一处需要维护的默认值。也没有 `distclean`：`clean` 之后一条命令就能重建全部，再分一档只是把同一个动作起两个名字。
 
-## 七、从零开始
+## 七、`deps` / `ext` / `vsix` 讲的是插件，不是工具
+
+这三条目标装的是附录 C 那个编辑器插件，和 `nw` 本身无关，所以它们不违反上一段"没有 `install`"：`nw` 的安装仍然是用的人自己 `ln -s`，而 `ext` 软链的是插件目录，名字还得是 `<publisher>.<name>-<version>`——那不是"默认值"，那是 VS Code 的规矩。
+
+它们该在这里，不该在附录 C，理由和整本书一样：**构建规则只有一份**，落在 `tangle/Makefile`。附录 C 讲插件长什么样，这里讲它怎么被装到机器上。
+
+四样东西不由 tangle 管，各自的理由不同：
+
+- `node_modules`（`deps`）：别人的代码。产物里出现它就是往仓库里塞一份第三方的副本，而且是一份没人知道版本的副本。
+- `vendor/katex`（`deps` 顺带取的）：公式排版的那份 JS。它只在 `weave` 时用一次，用完就不该再出现在任何产物里——所以它连 `node_modules` 都不进，单独躺在 `tangle/vendor/`。`deps` 用 `npm pack` 取 tarball 再解，比 `npm install` 少一层 `package.json` 的改动。
+- `syntaxes/nw.tmLanguage.json`（`vsix` 里查它在不在）：生成器的产物。它的真相在 `gen-grammar.js`，所以 `vsix` 不替它跑，只在缺席时停下来说清楚缺什么——静默打一个没有语法的包，装上去的人看到的是"高亮坏了"，而不是"少跑了一条命令"。
+- `icons/icon.png` 与 `LICENSE`（`cp` 两条）：仓库级事实，包内只需要副本。图标是二进制，硬塞进 `.nw` 会让一份 tex 源里躺着一串 base64；LICENSE 是仓库根那一条 GPL，包里不该有第二份被编辑过的文本。
+
+版本号从清单里现读（`VERSION` 用 `=`，不是 `:=`）：`package.json` 里那一处是唯一的真相，Makefile 里再抄一份，等于给自己排了一次"发版时忘了改"。
+
+`crosscheck` 也因此多排除几样。判据没变，还是那句"下游不该参与上游的对账"：`node_modules`、`syntaxes/`、拷进来的图标与 `LICENSE`、打出来的 `.vsix`，破点一样都不产出，把它们算进比对只会制造噪声。
+
+## 八、从零开始
 
 ```
 git clone <repo> && cd neoweb
 make            # 转发层铺出 tangle/，再编译出 tangle/build/nw
 make web        # 铺出 weave/ 那本书
-make serve      # 本地预览
+make serve      # 本地预览（端口被占就 make serve PORT=8081）
 make crosscheck # 两个实现是否还一致
 ```
 

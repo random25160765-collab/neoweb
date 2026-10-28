@@ -136,11 +136,13 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 序号是**篇内定义顺序**，从 1 开始。它不是为了好看：读者核对"产物里这块排第几"时，序号是唯一能跨页对齐的坐标。v2 也这么做，理由在那一版就成立——顺序是这本书的核心承诺之一。
 
 << 一个块 >>= @
-	// 一遍渲染要用的两张表：块落在哪些产物、块链到哪个锚点。
-	// 装进一个结构，函数签名就不必长成一串参数。
+	// 一遍渲染要用的四张表：块落在哪些产物、块链到哪个锚点、
+	// 块定义在哪、块被引用几次。装进一个结构，函数签名就不必长成一串参数。
 	struct Ctx {
 		map<size_t, vector<string>> homes;   // 块 → 产物路径（可多个）
 		map<size_t, string> href;            // 块 → 锚点（同页 #c-n，跨页 页名#c-n）
+		map<size_t, string> where;           // 块 → 定义位置（篇名 + 行号）
+		map<size_t, int> uses;               // 块 → 被引用次数
 	};
 
 	// 产物路径的后缀就是语言：`tangle/parse.cpp` 按 cpp 着色。
@@ -158,6 +160,24 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 
 	// 一个名字 → 一个链接。找不到就画一条划掉的线：读者要看见"这里断了一处"，
 	// 而不是看到一行凭空消失的代码。
+	// 链接上挂 title：读者看见一个名字，想问的无非三件事——它写在哪、它落进什么、它被用了几次。
+	string chunk_tip(const Document& doc, const Ctx& ctx, size_t idx) {
+		const Chunk& c = doc.chunks[idx];
+		string tip = c.name;
+		auto w = ctx.where.find(idx);
+		if (w != ctx.where.end()) tip += " · 定义于 " + w->second;
+		auto h = ctx.homes.find(idx);
+		if (h != ctx.homes.end() && !h->second.empty()) {
+			tip += " · 落在 ";
+			for (size_t i = 0; i < h->second.size(); ++i) tip += (i ? "、" : "") + h->second[i];
+		} else {
+			tip += " · 没有被任何 file 接到";
+		}
+		auto u = ctx.uses.find(idx);
+		tip += " · 被引用 " + std::to_string(u == ctx.uses.end() ? 0 : u->second) + " 次";
+		return tip;
+	}
+
 	string chunk_link(const Document& doc, const Ctx& ctx, const string& name, const vector<string>& ns,
 	                  const string& file, int at_line) {
 		string label = "&lt;&lt; " + html_escape(name) + " &gt;&gt;";
@@ -167,10 +187,11 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 		} catch (Error&) {
 		}
 		if (idx == SIZE_MAX) return "<span class=\"inst miss\">" + label + "</span>";
+		string tip = " title=\"" + html_escape(chunk_tip(doc, ctx, idx)) + "\"";
 		auto it = ctx.href.find(idx);
 		if (it == ctx.href.end() || it->second.empty())
-			return "<span class=\"inst\">" + label + "</span>";
-		return "<a class=\"inst\" href=\"" + html_escape(it->second) + "\">" + label + "</a>";
+			return "<span class=\"inst\"" + tip + ">" + label + "</span>";
+		return "<a class=\"inst\" href=\"" + html_escape(it->second) + "\"" + tip + ">" + label + "</a>";
 	}
 
 	// 代码里的实例行：缩进照抄，名字变成链接。
@@ -207,10 +228,13 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 		std::ostringstream out;
 		out << "<figure class=\"chunk\" id=\"c-" << seq << "\">\n<figcaption>";
 		out << "<span class=\"seq\">" << seq << "</span>";
-		out << "<span class=\"cname\">&lt;&lt; " << html_escape(c.name) << " &gt;&gt;</span>";
+		// 名字本身就是这一块的地址：点一下，#c-n 进地址栏，能贴给别人。
+		out << "<a class=\"cname\" href=\"#c-" << seq << "\" title=\"" << html_escape(chunk_tip(doc, ctx, idx))
+		    << "\">&lt;&lt; " << html_escape(c.name) << " &gt;&gt;</a>";
 		auto it = ctx.homes.find(idx);
 		if (it != ctx.homes.end())
 			for (const auto& p : it->second) out << "<span class=\"home\">" << html_escape(p) << "</span>";
+		out << "<a class=\"tree\" href=\"tree.html#q-" << idx << "\" title=\"在两棵树里看这一块\">图</a>";
 		out << "</figcaption>\n<pre class=\"code\"><code>" << code_html(doc, ctx, idx)
 		    << "</code></pre>\n</figure>\n";
 		return out.str();
@@ -275,64 +299,123 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 	// 一份 HTML 自带全部样式：双击就能看，不依赖构建、不依赖服务。
 	const char* css() {
 		return R"CSS(
-	:root { --fg:#1d1f23; --dim:#6a7280; --line:#e3e6ea; --bg:#fff; --code:#f7f8fa; --accent:#2f6f4f; }
+	:root {
+	  --fg:#1b1e23; --dim:#6b7280; --line:#e4e7ec; --bg:#fff; --code:#f6f7f9;
+	  --accent:#2f6f4f; --accent-soft:#eef4f0; --red:#a33636; --brown:#8a5a00; --blue:#3b5b9c;
+	  --radius:6px; --measure:42rem; --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+	}
 	* { box-sizing:border-box; }
+	html { -webkit-text-size-adjust:100%; scroll-behavior:smooth; }
 	body { margin:0; background:var(--bg); color:var(--fg);
-	  font:16px/1.85 -apple-system,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif; }
+	  font:16.5px/1.85 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;
+	  -webkit-font-smoothing:antialiased; }
 	a { color:var(--accent); text-decoration:none; }
-	a:hover { text-decoration:underline; }
-	nav.side { position:fixed; top:0; left:0; width:16rem; height:100vh; overflow:auto;
-	  padding:2rem 1.2rem; border-right:1px solid var(--line); font-size:.86rem; line-height:1.7; }
-	nav.side .part { margin:1.2rem 0 .35rem; color:var(--dim); font-size:.78rem; letter-spacing:.04em; }
-	nav.side a { display:block; padding:.12rem 0; color:var(--fg); }
-	nav.side a.here { color:var(--accent); font-weight:600; }
-	nav.side a.title { font-weight:700; margin-bottom:.9rem; color:var(--fg); }
-	ul.toc { list-style:none; padding:0; margin:.6rem 0 1.8rem; }
-	ul.toc li { margin:.25rem 0; }
-	main { margin-left:16rem; padding:3rem 2.5rem 6rem; }
-	article { max-width:40rem; }
-	h1 { font-size:1.9rem; line-height:1.35; margin:0 0 1.5rem; }
-	h2 { font-size:1.25rem; margin:2.6rem 0 .8rem; padding-bottom:.3rem; border-bottom:1px solid var(--line); }
-	h3 { font-size:1.05rem; margin:2rem 0 .6rem; }
-	p { margin:.9rem 0; }
-	code { font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace; font-size:.88em;
-	  background:var(--code); padding:.1em .35em; border-radius:3px; }
-	pre.code { background:var(--code); margin:.4rem 0 0; padding:.9rem 1rem; overflow:auto;
+	a:hover { text-decoration:underline; text-underline-offset:2px; }
+	nav.side { position:fixed; top:0; left:0; width:15.5rem; height:100vh; overflow:auto;
+	  padding:1.5rem 1.1rem 3rem; border-right:1px solid var(--line);
 	  font-size:.84rem; line-height:1.6; }
+	nav.side a.title { display:block; font-weight:700; font-size:.95rem; margin-bottom:1.4rem; color:var(--fg); }
+	nav.side .part { margin:1.5rem 0 .4rem; color:var(--dim); font-size:.72rem; letter-spacing:.06em; }
+	nav.side .part.here { color:var(--accent); }
+	nav.side a { display:block; padding:.2rem .55rem; margin-left:-.55rem; border-radius:var(--radius); color:var(--fg); }
+	nav.side a:hover { background:var(--code); text-decoration:none; }
+	nav.side a.here { color:var(--accent); font-weight:600; background:var(--accent-soft); }
+	ul.toc { list-style:none; padding:0; margin:.6rem 0 2rem; }
+	ul.toc li { margin:.3rem 0; }
+	main { margin-left:15.5rem; padding:2rem 2.5rem 6rem; }
+	article { max-width:var(--measure); margin:0 auto; }
+	h1 { font-size:2rem; line-height:1.3; letter-spacing:-.01em; margin:0 0 1.4rem; }
+	h2 { font-size:1.3rem; line-height:1.45; margin:2.4rem 0 .8rem; padding-bottom:.4rem;
+	  border-bottom:1px solid var(--line); scroll-margin-top:1.5rem; }
+	h3 { font-size:1.06rem; margin:2.2rem 0 .6rem; }
+	p { margin:1rem 0; }
+	ul,ol { padding-left:1.35rem; }
+	li { margin:.3rem 0; }
+	blockquote { margin:1.4rem 0; padding:.2rem 1.1rem; border-left:3px solid var(--line); color:var(--dim); }
+	hr { border:0; border-top:1px solid var(--line); margin:2.6rem 0; }
+	code { font-family:var(--mono); font-size:.875em; background:var(--code);
+	  padding:.12em .36em; border-radius:4px; }
+	pre.code { background:var(--code); margin:.55rem 0 0; padding:.95rem 1.05rem; overflow:auto;
+	  font-size:.84rem; line-height:1.66; }
 	pre.code code { background:none; padding:0; font-size:1em; }
 	pre.code .comment { color:var(--dim); font-style:italic; }
-	pre.code .keyword, pre.code .preproc { color:#a33; }
+	pre.code .keyword, pre.code .preproc { color:var(--red); }
 	pre.code .type, pre.code .usertype, pre.code .classname { color:var(--accent); }
-	pre.code .string, pre.code .specialchar { color:#8a5a00; }
-	pre.code .number, pre.code .function { color:#3b5b9c; }
-	pre.sample { background:var(--code); padding:.9rem 1rem; overflow:auto; border-radius:4px; }
-	figure.wire { margin:1.2rem 0; }
-	figure.wire pre.code { margin:0; border-radius:4px; border:1px dashed var(--line); }
-	blockquote { margin:1.2rem 0; padding:.2rem 1rem; border-left:3px solid var(--line); color:var(--dim); }
-	table { border-collapse:collapse; margin:1.2rem 0; font-size:.92rem; }
-	th,td { text-align:left; padding:.45rem .8rem; border-bottom:1px solid var(--line); vertical-align:top; }
-	th { font-weight:600; border-bottom:2px solid var(--line); }
-	figure.chunk { margin:1.4rem 0; border:1px solid var(--line); border-radius:4px; overflow:hidden; }
-	figure.chunk figcaption { display:flex; gap:.6rem; align-items:baseline; flex-wrap:wrap;
-	  padding:.45rem .9rem; background:var(--code); border-bottom:1px solid var(--line);
-	  font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace; font-size:.8rem; }
-	figure.chunk .seq { color:var(--accent); font-weight:700; }
+	pre.code .string, pre.code .specialchar { color:var(--brown); }
+	pre.code .number, pre.code .function { color:var(--blue); }
+	pre.sample { background:var(--code); border:1px solid var(--line); border-radius:var(--radius);
+	  padding:.95rem 1.05rem; overflow:auto; font-size:.85rem; line-height:1.7; }
+	pre.sample code { background:none; padding:0; }
+	figure.diagram { margin:2rem 0; text-align:center; }
+	figure.diagram svg { max-width:100%; height:auto; }
+	span.math { white-space:nowrap; }
+	span.math math { font-size:1.02em; }
+	div.math-block { margin:1.7rem 0; text-align:center; overflow-x:auto; }
+	div.math-block math { font-size:1.12em; }
+	figure.wire { margin:1.4rem 0; }
+	figure.wire pre.code { margin:0; border:1px dashed var(--line); border-radius:var(--radius); }
+	table { border-collapse:collapse; width:100%; margin:1.4rem 0; font-size:.92rem; }
+	th,td { text-align:left; padding:.5rem .75rem; border-bottom:1px solid var(--line); vertical-align:top; }
+	th { font-weight:600; background:var(--code); }
+	figure.chunk { margin:1.6rem 0; border:1px solid var(--line); border-radius:var(--radius);
+	  overflow:hidden; scroll-margin-top:1.5rem; }
+	figure.chunk:target { border-color:var(--accent); }
+	figure.chunk figcaption { display:flex; gap:.55rem; align-items:baseline; flex-wrap:wrap;
+	  padding:.5rem .95rem; background:var(--code); border-bottom:1px solid var(--line);
+	  font-family:var(--mono); font-size:.78rem; }
+	figure.chunk .seq { color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; }
+	figure.chunk a.cname { color:var(--fg); }
+	figure.chunk a.cname:hover { color:var(--accent); text-decoration:none; }
 	figure.chunk .home { margin-left:auto; color:var(--dim); }
+	figure.chunk a.tree { color:var(--dim); font-size:.78rem; padding-left:.5rem; }
+	figure.chunk a.tree:hover { color:var(--accent); text-decoration:none; }
+	ul.tree { list-style:none; margin:.35rem 0; padding:0 0 0 1.1rem; border-left:1px solid var(--line);
+	  line-height:1.5; }
+	ul.tree li { margin:.06rem 0; }
+	ul.tree li.branch { margin:.34rem 0 .1rem; }
+	ul.tree summary { position:relative; cursor:pointer; list-style:none; }
+	ul.tree summary::marker { content:""; }
+	ul.tree summary::-webkit-details-marker { display:none; }
+	ul.tree summary::before { content:""; position:absolute; left:-.65rem; top:.5em;
+	  border-left:6px solid var(--dim); border-top:5px solid transparent; border-bottom:5px solid transparent;
+	  transition:transform .12s ease; }
+	ul.tree details[open] > summary::before { transform:rotate(90deg); }
+	ul.tree summary:hover::before { border-left-color:var(--accent); }
+	ul.tree summary:hover .ns, ul.tree summary:hover .dir, ul.tree summary:hover .file { color:var(--accent); }
+	ul.tree .ns { font-weight:600; }
+	ul.tree .dir { font-family:var(--mono); font-size:.86rem; font-weight:600; }
+	ul.tree .file { font-family:var(--mono); font-size:.86rem; }
+	ul.tree .block { color:var(--dim); font-family:var(--mono); font-size:.82rem; }
+	ul.tree .qid { color:var(--dim); font-family:var(--mono); font-size:.72rem; opacity:.55; margin-left:.3rem; }
+	ul.tree a { color:var(--accent); }
+	ul.tree .home { color:var(--dim); font-size:.78rem; opacity:.7; margin-left:.35rem; }
+	p.lead { color:var(--dim); margin-top:-.4rem; }
 	span.inst { color:var(--accent); }
-	span.inst.miss { color:#a33; text-decoration:line-through; }
-	.miss { color:#a33; }
-	.pager { display:flex; justify-content:space-between; margin:4rem 0 0; padding-top:1.2rem;
-	  border-top:1px solid var(--line); font-size:.9rem; }
+	span.inst.miss { color:var(--red); text-decoration:line-through; }
+	.miss { color:var(--red); }
+	.pager { display:flex; justify-content:space-between; gap:1rem; margin:4.5rem 0 0;
+	  padding-top:1.4rem; border-top:1px solid var(--line); font-size:.9rem; }
 	@media (max-width:64rem) {
 	  nav.side { position:static; width:auto; height:auto; border-right:0;
-	    border-bottom:1px solid var(--line); padding:1rem 1.5rem; }
-	  main { margin-left:0; padding:2rem 1.5rem 4rem; }
+	    border-bottom:1px solid var(--line); padding:1.2rem 1.4rem; }
+	  main { margin-left:0; padding:2.2rem 1.4rem 4rem; }
+	}
+	@media print {
+	  nav.side { display:none; }
+	  main { margin:0; padding:0; }
+	  article { max-width:none; }
+	  a { color:inherit; }
+	  figure.chunk, pre.code, pre.sample, figure.diagram { break-inside:avoid; }
 	}
 	)CSS";
 	}
 ~@
 
-样式只有一条判据：**读者不该注意到它**。所以色板压到四个色（正文字、次要字、线、强调），字号只有四档，圆角统一成两个值。`@media` 一档是为了窄屏：左栏落回顶部，变成一份普通目录。
+样式只有一条判据：**读者不该注意到它**。所以颜色先收进 `:root` 的七个 token 里，正文里不再出现一个色号；圆角只有一个值（`--radius`），要么全是 6px，要么一处都不改；行宽固定成 `--measure`，`main` 与 `article` 两层的职责分开——前者管留白，后者管行长。
+
+两档 `@media` 各答一件事：窄屏把左栏落回顶部变成普通目录；打印把左栏整条拿掉、链接去色、块不许跨页断开。`prefers-color-scheme` 一个都不写——这本书不做深色档，一份没设计过的深色版比没有更糟。
+
+锚点也有样式：`figure.chunk:target` 让"点进来的那一块"描边变强调色。没有这一条，从两棵树跳回正文后，读者还得自己在一屏里找刚才是哪一块。
 
 `pre.code` 底下那五行是给着色器配的颜色。着色器只负责把代码切成 `class="keyword"` 这样的词，**颜色不在它手里**——它自带的那份样式表有二十几个色号，装进来这本书就成了调色盘。这里只认四类：注释（次要字，斜体）、关键字与预处理（红）、类型（强调色）、字符串与数字（棕、蓝）。剩下的 `normal`、`symbol`、`cbracket` 没有规则，继承正文字色——这正是要的：标点不该抢眼。
 
@@ -340,9 +423,31 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 
 ## 六、页面外壳
 
-外壳只做三件事：写 `<!doctype>`、把样式塞进 `<style>`、把导航与正文摆进两个容器。它不知道正文里有什么，也不知道导航从哪来——**两者都是字符串，谁调用谁负责**。
+外壳只做四件事：写 `<!doctype>`、把样式塞进 `<style>`、把导航与正文摆进两个容器、在 `</body>` 之前放那一段左栏滚动记忆。它不知道正文里有什么，也不知道导航从哪来——**两者都是字符串，谁调用谁负责**。
+
+那十行脚本是整份 HTML 里唯一的一段 JavaScript，理由也只有一条：侧栏滚到哪，浏览器不负责记。翻页是整页加载，`nav` 又从顶部开始，读者刚拖到"第 5 章"、点进去，回来时又得拖一遍。用 `sessionStorage` 记住一个数字就能解决，而它坏掉时页面完全照常——**便利可以依赖脚本，可读性不行**。
 
 << 页面外壳 >>= @
+	// 左栏的滚动位置存进 sessionStorage：翻页是一次整页加载，浏览器不会替你记住侧栏滚到哪儿。
+	// 没有脚本时退化成"每次从顶部开始"，也就是这一段不存在的效果——所以它只能算便利，
+	// 不能算功能：页面的可读性一点也不依赖它。
+	// 第一次进站（还没存过）时，把当前篇滚进视野，省掉"找我在哪"。
+	const char* nav_scroll_js() {
+		return R"JS(
+	(function(){
+	  try{
+	    var nav=document.querySelector("nav.side");
+	    if(!nav) return;
+	    var key="nw-nav";
+	    var raw=sessionStorage.getItem(key);
+	    if(raw!==null){ nav.scrollTop=parseInt(raw,10)||0; }
+	    else { var here=nav.querySelector("a.here"); if(here&&here.scrollIntoView) here.scrollIntoView({block:"nearest"}); }
+	    nav.addEventListener("scroll",function(){ try{ sessionStorage.setItem(key,String(nav.scrollTop)); }catch(e){} },{passive:true});
+	  }catch(e){}
+	})();
+	)JS";
+	}
+
 	// 外壳不认识正文，也不认识导航：两者都是字符串，谁调用谁负责。
 	string page_shell(const string& title, const string& nav, const string& body) {
 		std::ostringstream out;
@@ -350,7 +455,7 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 		    << "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
 		    << "<title>" << html_escape(title) << "</title>\n<style>" << css() << "</style>\n</head>\n<body>\n";
 		if (!nav.empty()) out << "<nav class=\"side\">" << nav << "</nav>\n";
-		out << "<main><article>\n" << body << "</article></main>\n</body>\n</html>\n";
+		out << "<main><article>\n" << body << "</article></main>\n<script>" << nav_scroll_js() << "</script>\n</body>\n</html>\n";
 		return out.str();
 	}
 ~@
