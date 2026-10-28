@@ -1,0 +1,170 @@
+这是一次对过往语法的破坏性重构。neoweb v3.
+
+parse 解析“AST”，也就是一个可综合的源码树，然后 tangle 消费 AST 综合成整个 repo，weave 消费 AST 综合成 html（当然weave主要还是处理nw原文，但AST负责提供语义）。
+
+注意我这里用的词是综合，因为这个东西很像 verilog，是描述式的。之前基于 C/C++ 的心智模型把我绕进了死胡同，现在可以完全被取代了。agent所做的就是把逻辑拓扑声明好，程序就是一个软件综合器
+
+我在这里定义一批基本对象类型：dir，file，chunk。
+
+如何组织一个大项目？首先要定义顶层module，也就是把tangle的repo骨架搞出来：
+
+dir top @
+	dir            .github;
+	dir            asset;
+	dir            book;
+	dir            docs;
+	file           .gitignore;
+	file<py>       bootstrap;
+	file<license>  LICENSE;
+	file<makefile> Makefile;
+	file<md>       README;
+~@
+
+top 是保留关键词，代表tangle的目标文件夹。注意类型在泛型里实现了，使用typename<>。我们用末尾为;，带类型的语句把模块assign在顶层模块上。
+
+然后我们就开始写具体的内容，把每个章节都assign了。注意，在这里我直接使用了现有neoweb的文件组织结构，实际使用中，我们不会把.nw文件作为tangle的目标，就好像你不会想综合出 HDL 一样。所以自指问题不存在。
+
+dir book @
+	dir Chapter_1;
+	dir Chapter_2;
+	dir Chapter_3;
+	dir Appendix_A;
+~@
+
+dir Chapter_1 @
+	file<md> 1-history;
+	file<md> 2-crisis; %% 随便assign 两个文件%%
+	file<c>  hello_world;
+~@
+
+然后我们来把chunk也assign进去：使用旧写法依然是ok的！
+
+<< include >>= @
+	#include<stdio.h>
+~@
+
+'<<  >>' 依然表示chunk，兼容noweb等工具的语法习惯。
+
+<< printer >>= @
+	printf("hello world!\n");
+~@
+
+注意，chunk里面不可以再定义chunk，只能实例化并拼接。这类写法现在不被允许。
+
+%% 默认的实例化，AST中它有一个独一无二的别名 %%
+<< main >>= @
+	int main() {
+		<< printer >> 
+		return 0;
+	}
+~@
+
+最后我们来把这些chunk都assign一下：
+
+file<c> hello_world @
+	<< include >>
+	<< main >>
+~@
+
+namespace机制可以彻底滚蛋了！换成更明确的verilog式接线。还有诡异的@after和@before，用来调整顺序的，现在可以删掉了！为了简洁起见，把最早的花括号写法（之前被@和~@代替）也删掉吧。
+
+那么::语法用来做什么呢？它专门用来在chunk层面上做命名空间隔离，要不然名字会乱（注意这里的名字是模块的名字，不是AST里的实例名字！）。命名空间的语法现在和文件以及文件夹彻底没关系，就是给chunk提供命名空间用的，为了明确起见，命名空间的@和~@现在用::和~::来替代————
+
+!! x::
+	
+<< a >>= @
+	...
+~@
+
+<< b >>= @
+	...
+~@
+
+~::
+
+!!内部可以嵌套定义：
+
+!! what ::
+	!! the ::
+		!! fuck ::
+		~::
+	~::
+~::
+
+其中::和~::逐层配对，和之前的 @ 与 ~@ 一样。
+
+!! a::b::c:: 是 !! a :: !! b :: !! c :: 的语法糖
+
+!! what::the::fuck::
+<< c >>= @ 
+~@
+~::~::~::
+
+<<d::e::f::g>>= @
+	...
+~@
+
+%% 它们的模块名相同，但在 AST 里名字不一样。%%
+file<py> example @
+	<<x::a>>
+	<<x::b>>
+	<<what::the::fuck::c>>
+	what::the::fuck::  <<c>> ~::~::~::
+	<<d::e::f::g>>
+	<<d::e::f::g>>
+	<<d::e::f::g>>
+	<<d::e::f::g>>
+~@
+
+注意，在外面声明和在内部使用命名空间的语法不一样。一个是!! a:: ~::,一个是 a:: ~::，区别在于有没有!!
+对应cpp的namespace和using namespace
+
+namespace的name不可以和chunk名重名，冲突判定在统一父作用域内。
+
+顺序接线还可以这样：用 | 来代替 \n, 让视觉上更紧凑。这两个是一样的作用。
+连续多个|或者\n视同一个。| 可以出现在行尾，表示与下一行拼接；不允许出现在行首。
+
+file<py> example @
+	<<x::a>> | <<x::b>> |<<what::the::fuck::c>>
+	<<d::e::f::g>> | <<d::e::f::g>> |<<d::e::f::g>> | <<d::e::f::g>>
+~@
+
+还可以这样
+
+file<py> example @
+	<<x::a>> | <<x::b>> |<<what::the::fuck::c>>
+	d::e::f:: 
+		<<g>> | <<g>> | <<g>> | <<g>>
+	~::~::~::
+~@
+
+然后namespace里面找不到块，不允许向上逐层回退（和verilog一样，这和cpp不一样）
+根命名空间里的东西，在 !! 里面够不着————如果没有任何
+
+需要注意的是，verilog只有module，但我们实际上有dir/file/chunk三级，因为它们的底层根本不一样。chunk需要实现和实例化，dir对上只需要接线（;语法）；file对上只要接线，对下层而言，file的内部是被chunk实例化的。dir和file都不需要实例化（根本没有实例化这一说！）。
+
+关于注释：块内不要有 %%%% 注释。%%%% 在块外使用，块内使用语言自己的注释语法。
+
+一些约束：
+
+不能出现同名文件/目录（除非它们的类型不一样！比如一个file<c>一个file<python>）
+同一个文件/目录不能同时出现在两个目录，也就是说声明位置唯一，否则物理路径冲突
+实现了但没有在任何地方实例化的chunk，也就是不可达的chunk，要warn
+实现了但不属于任何文件夹的file要warn
+一个chunk不能有多个实现（因此之前的“赋值覆盖”要拿掉！）
+被实例化的chunk必须要有实现
+（太多了...其他的你对着约束来写吧。）
+
+保留字清单：top, dir, file（暂定）
+注意：namespace，chunk不是关键字。
+
+---
+现在我们parse出来应该有两个东西，一个是由namespace展开的chunk树，里面有所有的chunk；还有一个是由dir/file/chunk展开的，具体的代码组织树。这些结构化信息传给weave后端和ide插件，可以做出以下新功能：
+
+weave html里的hover显示与点击跳转
+chunk namespace tree与code tree两套图的可视化与导航
+...
+
+由于语法全部变了，ide插件要更新，weave后端要更新，全部都要更新。
+
+---
