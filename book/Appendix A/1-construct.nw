@@ -108,6 +108,10 @@ make crosscheck
 	# 二进制是 tangle 产物的下游，跟着产物一起放在 tangle/ 下。
 	NW       := tangle/build/nw
 	BOOT     := python3 bootstrap.py
+	# 装到哪里：默认用户自己的 bin，不需要 sudo。换位置就在命令行覆盖：
+	#   make install PREFIX=/usr/local（那时需要 sudo）
+	PREFIX   ?= $(HOME)/.local
+	BINDIR   ?= $(PREFIX)/bin
 	# 端口是这台机器的状态，不是这本书的属性：8080 被别的服务占着是常态，
 	# 所以做成可覆盖的，而不是改一行再改回来。
 	PORT     ?= 8080
@@ -122,7 +126,7 @@ make crosscheck
 	# 抄了就等着哪次发版只改了一处。用 = 而不是 :=，读的时候产物已经铺好了。
 	VERSION   = $(shell node -p "require('./$(EDITOR)/package.json').version")
 
-	.PHONY: all check test web md serve deps ext vsix crosscheck clean
+	.PHONY: all install check test web md serve deps ext vsix crosscheck clean
 
 	all: $(NW)
 
@@ -138,6 +142,22 @@ make crosscheck
 
 	$(NW): .tangle-stamp
 		$(CXX) $(CXXFLAGS) -o $@ tangle/*.cpp $(LIBS)
+
+	# 唯一一个往仓库外写东西的目标。两种装法各管一种情形：
+	# 目标已经是软链 → 只更新指向（开发时的装法，重编即生效）；
+	# 目标不存在或是副本 → 拷一份 755 的（install 的常规语义，cp 会带上仓库的 umask）。
+	install: $(NW)
+		@mkdir -p $(BINDIR)
+		@if [ -L "$(BINDIR)/nw" ]; then \
+		  ln -sfn "$(CURDIR)/$(NW)" "$(BINDIR)/nw"; \
+		  echo "更新软链：$(BINDIR)/nw -> $(CURDIR)/$(NW)"; \
+		else \
+		  install -m 755 $(NW) $(BINDIR)/nw; \
+		  echo "装好了：$(BINDIR)/nw"; \
+		fi
+		@case ":$$PATH:" in *":$(BINDIR):"*) ;; \
+		  *) echo "PATH 里还没有 $(BINDIR)，把这一行加进 shell 启动文件："; \
+		     echo "  export PATH=\"$(BINDIR):\$$PATH\"" ;; esac
 
 	# 判定归二进制：--check 只读源、不写盘。依赖 $(NW)，免得拿旧二进制查新源。
 	check: $(NW)
@@ -227,11 +247,17 @@ make crosscheck
 
 **二进制为什么在 `tangle/build/`**：它由 `tangle/*.cpp` 编译而来，是 tangle 产物的下游。放在 `tangle/` 顶层会和源码混在一起，`ls` 又要靠后缀去分辨；放进 `build/` 之后，"源码在 `tangle/`、编译物在 `tangle/build/`、站点在 `weave/`"三句话就说完了。`build/` 不在骨架里——它不是 tangle 铺出来的，是编译器写的。
 
-**这里没有 `install`**：装到 `PATH` 是每个用的人自己的事，一条 `ln -s` 就够了，把它写进 Makefile 只多一处需要维护的默认值。也没有 `distclean`：`clean` 之后一条命令就能重建全部，再分一档只是把同一个动作起两个名字。
+**`install` 只往用户自己的 bin 写。** 默认 `$(HOME)/.local/bin`，不碰 `/usr/local`——装进系统目录要 sudo，而构建不该替你提权。想换位置就给 `PREFIX`。
+
+**目标是软链就只更新指向，不拷。** 开发这个仓库时常见的装法是先 `ln -s` 过来；那时再拷一份，等于把"改完重编即生效"换成"每次重装"，而且源与目标同文件，`install` 会直接拒绝。所以它先看 `-L`：是软链就 `ln -sfn` 指回 `$(CURDIR)/$(NW)`（绝对路径，换个目录敲 `nw` 也不会失效），不是才拷一份。
+
+它也不替你改 shell 启动文件。`PATH` 是每个人自己的配置，猜错一个 rc 文件（bash 的 `.bashrc`、zsh 的 `.zshrc`、fish 的 `config.fish`）比少写一行更难查，所以它只把该加的那行打出来，加不加由你决定。
+
+也没有 `distclean`：`clean` 之后一条命令就能重建全部，再分一档只是把同一个动作起两个名字。
 
 ## 七、`deps` / `ext` / `vsix` 讲的是插件，不是工具
 
-这三条目标装的是附录 C 那个编辑器插件，和 `nw` 本身无关，所以它们不违反上一段"没有 `install`"：`nw` 的安装仍然是用的人自己 `ln -s`，而 `ext` 软链的是插件目录，名字还得是 `<publisher>.<name>-<version>`——那不是"默认值"，那是 VS Code 的规矩。
+这三条目标装的是附录 C 那个编辑器插件，和 `nw` 二进制无关：`install` 复制的是一份 `nw`，`ext` 软链的是插件目录，而插件目录名还得是 `<publisher>.<name>-<version>`——那不是"默认值"，那是 VS Code 的规矩。
 
 它们该在这里，不该在附录 C，理由和整本书一样：**构建规则只有一份**，落在 `tangle/Makefile`。附录 C 讲插件长什么样，这里讲它怎么被装到机器上。
 

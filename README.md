@@ -41,8 +41,9 @@ make serve        # preview at http://127.0.0.1:8080
 | Command | What it does |
 |---|---|
 | `make` | tangle the book, then compile `tangle/build/nw` |
+| `make install` | copy the binary into `~/.local/bin` (override with `PREFIX=/usr/local`) |
 | `make check` | source checks only: duplicate definitions, unresolvable references, mount conflicts, unreachable chunks |
-| `make test` | the Python port's test suite (46 syntax, book and tangle cases) |
+| `make test` | the Python port's test suite (51 syntax, book and tangle cases) |
 | `make web` | render one HTML page per chapter, ordered by the `book` structure in the source |
 | `make md` | export the same source as Markdown, mirroring the book's directory layout |
 | `make serve` | kill any running preview, then serve `weave/` (another port: `make serve PORT=8081`) |

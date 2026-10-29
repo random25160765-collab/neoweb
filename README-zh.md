@@ -41,8 +41,9 @@ make serve        # 本地预览，默认 http://127.0.0.1:8080
 | 命令 | 做什么 |
 |---|---|
 | `make` | tangle 全书 → 编译 `tangle/build/nw` |
+| `make install` | 把二进制装进 `~/.local/bin`（换位置：`make install PREFIX=/usr/local`） |
 | `make check` | 只查源：重复实现、未实现的引用、挂载冲突、不可达的块 |
-| `make test` | 破点的用例（46 个语法、书结构与 tangle 用例） |
+| `make test` | 破点的用例（51 个语法、书结构与 tangle 用例） |
 | `make web` | 把每一篇渲成一页 HTML，按源里的 `book` 结构排目录与上下章 |
 | `make md` | 同一份源出 Markdown 版（镜像书的目录），给离线评审与归档 |
 | `make serve` | 先让开端口，再起服务（换端口：`make serve PORT=8081`） |
