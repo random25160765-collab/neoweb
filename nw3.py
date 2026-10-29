@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""neoweb v3 原型：parse → AST（chunk 树 + 代码树）→ check → tangle。
+"""neoweb v3 原型：parse → AST（chunk 树 + 代码树 + 书）→ check → tangle。
 
-对着 book/Chapter 2/granmmerv3.nw 实现。这是验证语法的原型，不是 C++ 实现。
+对着 docs/granmmerv3.nw 实现。这是验证语法的原型，不是 C++ 实现。
 
 用法：
     python3 nw3.py check  源.nw
     python3 nw3.py tangle -o 输出目录 源.nw
-    python3 nw3.py ast    源.nw
+    python3 nw3.py parse  [--ast] 源.nw
+    python3 nw3.py ast    源.nw          # 等价于 parse --ast
 """
 
 import json
@@ -34,6 +35,7 @@ class Inst:
     name: str        # 写在 << >> 里的名字（可能是短名，靠 ns 解析）
     ns: tuple        # 实例所在行的命名空间（段元组）
     no: int          # 源行号
+    fname: str = ""  # 它写在哪一篇里（ast 的出处，不是合并后的主篇）
 
 
 @dataclass
@@ -68,7 +70,10 @@ class Mount:
 class DirNode:
     name: str
     mounts: list = field(default_factory=list)   # Mount，保持文档顺序
+    declared: bool = False   # 有过 dir X @：只能一次
+    touched: bool = False    # 有过 @ 或 +=：决定是否落盘
     mounted: int = 0
+    no: int = 0
 
 
 @dataclass
@@ -76,8 +81,41 @@ class FileNode:
     name: str
     type: str
     body: list = field(default_factory=list)     # Inst，保持文档顺序
+    declared: bool = False
+    touched: bool = False
     mounted: int = 0
     no: int = 0
+
+
+@dataclass
+class Kid:
+    """清单里的一项：一个子部，或一篇散篇。"""
+    is_part: bool
+    key: str
+    no: int = 0
+    fname: str = ""
+
+
+@dataclass
+class PartDef:
+    name: str
+    title: str = ""
+    declared: bool = False
+    touched: bool = False
+    kids: list = field(default_factory=list)
+    no: int = 0
+    end_no: int = 0
+
+
+@dataclass
+class BookDef:
+    name: str = ""
+    title: str = ""
+    declared: bool = False
+    touched: bool = False
+    kids: list = field(default_factory=list)
+    no: int = 0
+    end_no: int = 0
 
 
 class NWError(Exception):
@@ -90,9 +128,25 @@ class NWError(Exception):
 # ---------------------------------------------------------------- 正则
 
 RE_DIR_DEF    = re.compile(r"^dir\s+([\w.-]+)\s*@\s*$")
+RE_DIR_ADD    = re.compile(r"^dir\s+([\w.-]+)\s*\+=\s*@\s*$")
 RE_DIR_MOUNT  = re.compile(r"^dir\s+([\w.-]+)\s*;\s*$")
 RE_FILE_DEF   = re.compile(r"^file(?:<([\w-]+)>)?\s+([\w.-]+)\s*@\s*$")
+RE_FILE_ADD   = re.compile(r"^file(?:<([\w-]+)>)?\s+([\w.-]+)\s*\+=\s*@\s*$")
 RE_FILE_MOUNT = re.compile(r"^file(?:<([\w-]+)>)?\s+([\w.-]+)\s*;\s*$")
+RE_BOOK_DEF   = re.compile(r"^book\s+([\w.-]+)\s*@\s*$")
+RE_BOOK_ADD   = re.compile(r"^book\s+([\w.-]+)\s*\+=\s*@\s*$")
+RE_PART_DEF   = re.compile(r"^part\s+([\w.-]+)\s*@\s*$")
+RE_PART_ADD   = re.compile(r"^part\s+([\w.-]+)\s*\+=\s*@\s*$")
+
+# 糖：+= 只接一个目标，父恒为左侧对象
+RE_DIR_SUGAR  = re.compile(r"^dir\s+([\w.-]+)\s*\+=\s*(dir\s+[\w.-]+|file(?:<[\w-]+>)?\s+[\w.-]+)\s*;\s*$")
+RE_FILE_SUGAR = re.compile(r"^file(?:<([\w-]+)>)?\s+([\w.-]+)\s*\+=\s*(<<[^<>]*>>)\s*;\s*$")
+RE_BOOK_SUGAR = re.compile(r"^book\s+([\w.-]+)\s*\+=\s*(part|essay)\s+(.+?)\s*;\s*$")
+RE_PART_SUGAR = re.compile(r"^part\s+([\w.-]+)\s*\+=\s*(part|essay)\s+(.+?)\s*;\s*$")
+
+# 清单体里的一行：part / essay / name
+RE_KID        = re.compile(r"^(part|essay|name)\s+(.+?)\s*;\s*$")
+
 RE_CHUNK_DEF  = re.compile(r"^<<\s*(.+?)\s*>>=\s*@\s*$")
 RE_CLOSE      = re.compile(r"^~@\s*$")
 RE_NS_DECL    = re.compile(r"^!!\s*((?:[\w.-]+::)+)\s*$")
@@ -155,11 +209,13 @@ class Parser:
         self.chunks = {}          # 全名 → Chunk
         self.dirs = {}            # name → DirNode
         self.files = {}           # (name, type) → FileNode
+        self.parts = {}           # name → PartDef
+        self.book = BookDef()
         self.ns_decls = set()     # 声明过的 ns 全名
         self.errors = []
         self.warnings = []
         self.prose = []           # (行号, 文本)，给 weave 留的
-        self.block = []           # ('dir', DirNode) | ('file', FileNode) | ('chunk', Chunk)
+        self.block = []           # (kind, node)，kind ∈ dir/file/chunk/book/part
         self.ns = []              # 当前命名空间段栈
         self.fence = ""           # 非空 = 围栏内
         self.cur_lines = None     # 正在收的 chunk 体
@@ -191,6 +247,8 @@ class Parser:
             self._chunk_line(no, raw)
         elif self._in_file():
             self._file_line(no, raw)
+        elif self._in_list():
+            self._list_line(no, raw)
         else:
             self._struct_line(no, raw)
 
@@ -203,15 +261,20 @@ class Parser:
     def _in_dir(self):
         return bool(self.block) and self.block[-1][0] == "dir"
 
+    def _in_list(self):
+        return bool(self.block) and self.block[-1][0] in ("book", "part")
+
+    def _strip(self, no, raw):
+        try:
+            return strip_comment(raw, no).strip()
+        except NWError as e:
+            self.err(no, e.msg)
+            return raw.strip()
+
     # ------------------------------------------------ 结构层（文档态 / dir 体）
 
     def _struct_line(self, no, raw):
-        try:
-            ln = strip_comment(raw, no)
-        except NWError as e:
-            self.err(no, e.msg)
-            ln = raw
-        t = ln.strip()
+        t = self._strip(no, raw)
         if not t:
             return
 
@@ -243,27 +306,15 @@ class Parser:
             self.err(no, f"命名空间引入 {m.group(1)!r} 只能写在 file 体或 chunk 体内")
             return
 
-        # 定义与挂载
-        m = RE_DIR_DEF.match(t)
+        # ---- 定义与追加（带体）----
+        m = RE_DIR_DEF.match(t) or RE_DIR_ADD.match(t)
         if m:
             if self._in_file():
                 self.err(no, "file 体内不能定义 dir")
                 return
-            name = m.group(1)
-            if name == "top" and any(k == "top" for k in self.dirs):
-                self.err(no, "top 已经定义过")
-                return
-            if name in self.dirs:
-                self.err(no, f"dir {name} 重复定义")
-                return
-            self.block.append(("dir", DirNode(name, [])))
-            self.dirs[name] = self.block[-1][1]
+            self._open_dir(no, m.group(1), "+=" in t)
             return
-        m = RE_DIR_MOUNT.match(t)
-        if m:
-            self._mount(no, "dir", m.group(1), None)
-            return
-        m = RE_FILE_DEF.match(t)
+        m = RE_FILE_DEF.match(t) or RE_FILE_ADD.match(t)
         if m:
             if self._in_file():
                 self.err(no, "file 体内不能定义 file")
@@ -272,18 +323,50 @@ class Parser:
             if typ and typ not in TYPE_SUFFIX:
                 self.err(no, f"未知文件类型 <{typ}>")
                 return
-            key = (name, typ)
-            if key in self.files:
-                self.err(no, f"file {name}<{typ}> 重复定义")
+            self._open_file(no, name, typ, "+=" in t)
+            return
+        m = RE_BOOK_DEF.match(t) or RE_BOOK_ADD.match(t)
+        if m:
+            self._open_book(no, m.group(1), "+=" in t)
+            return
+        m = RE_PART_DEF.match(t) or RE_PART_ADD.match(t)
+        if m:
+            self._open_part(no, m.group(1), "+=" in t)
+            return
+
+        # ---- 追加的糖：一行一个目标 ----
+        m = RE_DIR_SUGAR.match(t)
+        if m:
+            self._append_dir(no, m.group(1), m.group(2))
+            return
+        m = RE_FILE_SUGAR.match(t)
+        if m:
+            typ, name, stmt = m.group(1), m.group(2), m.group(3)
+            if typ and typ not in TYPE_SUFFIX:
+                self.err(no, f"未知文件类型 <{typ}>")
                 return
-            node = FileNode(name, typ, [], no=no)
-            self.files[key] = node
-            self.block.append(("file", node))
+            self._append_file(no, name, typ, stmt)
+            return
+        m = RE_BOOK_SUGAR.match(t)
+        if m:
+            self._append_book(no, m.group(1), m.group(2), m.group(3))
+            return
+        m = RE_PART_SUGAR.match(t)
+        if m:
+            self._append_part(no, m.group(1), m.group(2), m.group(3))
+            return
+
+        # ---- 挂载 ----
+        m = RE_DIR_MOUNT.match(t)
+        if m:
+            self._mount(no, "dir", m.group(1), None)
             return
         m = RE_FILE_MOUNT.match(t)
         if m:
             self._mount(no, "file", m.group(2), m.group(1))
             return
+
+        # ---- chunk 定义 ----
         m = RE_CHUNK_DEF.match(t)
         if m:
             if self._in_file():
@@ -303,18 +386,145 @@ class Parser:
             return
 
         # 其余是散文
-        self.prose.append((no, ln))
+        self.prose.append((no, raw))
 
-    def _chunk_fullname(self, name, no):
-        segs = name.split("::")
-        for s in segs:
-            if not s.strip():
-                self.err(no, f"chunk 名 {name!r} 有空段")
-                return None
-            if any(c in s for c in "<>:"):
-                self.err(no, f"chunk 名 {name!r} 含非法字符（<>:）")
-                return None
-        return ns_join(self.ns, name) if "::" not in name else name
+    # ------------------------------------------------ 开块
+
+    def _dir_node(self, name, no):
+        d = self.dirs.get(name)
+        if d is None:
+            d = DirNode(name=name, no=no)
+            self.dirs[name] = d
+        return d
+
+    def _file_node(self, name, typ, no):
+        key = (name, typ)
+        f = self.files.get(key)
+        if f is None:
+            f = FileNode(name, typ, no=no)
+            self.files[key] = f
+        return f
+
+    def _part_node(self, name, no):
+        p = self.parts.get(name)
+        if p is None:
+            p = PartDef(name=name, no=no)
+            self.parts[name] = p
+        return p
+
+    def _open_dir(self, no, name, append):
+        d = self._dir_node(name, no)
+        if not append:
+            if d.declared:
+                self.err(no, f"dir {name} 重复定义")
+                return
+            d.declared = True
+        d.touched = True
+        self.block.append(("dir", d))
+
+    def _open_file(self, no, name, typ, append):
+        f = self._file_node(name, typ, no)
+        if not append:
+            if f.declared:
+                self.err(no, f"file {name}<{typ or ''}> 重复定义")
+                return
+            f.declared = True
+        f.touched = True
+        self.block.append(("file", f))
+
+    def _open_book(self, no, name, append):
+        b = self.book
+        if b.name and b.name != name:
+            self.err(no, f"一本书只能有一个 book 定义：{b.name} 与 {name}")
+            return
+        if not append:
+            if b.declared:
+                self.err(no, f"book 重复定义：{name}")
+                return
+            b.declared = True
+        if not b.name:
+            b.name = name
+            b.no = no
+        b.touched = True
+        self.block.append(("book", b))
+
+    def _open_part(self, no, name, append):
+        p = self._part_node(name, no)
+        if not append:
+            if p.declared:
+                self.err(no, f"part {name} 重复定义")
+                return
+            p.declared = True
+        p.touched = True
+        self.block.append(("part", p))
+
+    # ------------------------------------------------ 追加的糖
+
+    def _append_dir(self, no, parent, stmt):
+        d = self._dir_node(parent, no)
+        d.touched = True
+        m = re.match(r"^dir\s+([\w.-]+)$", stmt)
+        if m:
+            d.mounts.append(Mount("dir", m.group(1), None, no))
+            return
+        m = re.match(r"^file(?:<([\w-]+)>)?\s+([\w.-]+)$", stmt)
+        if m:
+            typ, name = m.group(1), m.group(2)
+            if typ and typ not in TYPE_SUFFIX:
+                self.err(no, f"未知文件类型 <{typ}>")
+                return
+            d.mounts.append(Mount("file", name, typ, no))
+            return
+        self.err(no, f"dir 只能追加 dir 或 file：{stmt}")
+
+    def _append_file(self, no, name, typ, stmt):
+        f = self._file_node(name, typ, no)
+        f.touched = True
+        names = RE_ONE_INST.findall(stmt)
+        if not RE_INSTS.match(stmt) or len(names) != 1:
+            self.err(no, f"file 的 += 只接一个 chunk 实例：{stmt}")
+            return
+        f.body.append(Inst(names[0], tuple(self.ns), no, self.fname))
+
+    def _append_book(self, no, name, kw, key):
+        if self.book.name != name:
+            self.err(no, f"+= 到不存在的 book：{name}")
+            return
+        self._append_kid(self.book.kids, no, kw, key)
+
+    def _append_part(self, no, name, kw, key):
+        p = self._part_node(name, no)
+        p.touched = True
+        self._append_kid(p.kids, no, kw, key)
+
+    def _append_kid(self, kids, no, kw, key):
+        key = key.strip()
+        if kw not in ("part", "essay") or not key:
+            self.err(no, f"只能追加 part 或 essay：{kw} {key}")
+            return
+        kids.append(Kid(kw == "part", key, no, self.fname))
+
+    # ------------------------------------------------ 清单体
+
+    def _list_line(self, no, raw):
+        t = self._strip(no, raw)
+        if not t:
+            return
+        if RE_CLOSE.match(t):
+            self._close_block(no)
+            return
+        kind, node = self.block[-1]
+        m = RE_KID.match(t)
+        if not m:
+            self.err(no, f"清单里只能写 part / essay / name：{t}")
+            return
+        kw, val = m.group(1), m.group(2).strip()
+        if kw == "name":
+            node.title = val
+            return
+        node.kids.append(Kid(kw == "part", val, no, self.fname))
+
+    # ------------------------------------------------ 挂载
 
     def _mount(self, no, kind, name, typ):
         # 挂载必须发生在某个 dir 体内（top 或下层）
@@ -335,6 +545,20 @@ class Parser:
         if kind == "chunk":
             self._dedent(node)
             self.cur_lines = None
+            return
+        if kind in ("book", "part"):
+            node.end_no = no
+
+    def _chunk_fullname(self, name, no):
+        segs = name.split("::")
+        for s in segs:
+            if not s.strip():
+                self.err(no, f"chunk 名 {name!r} 有空段")
+                return None
+            if any(c in s for c in "<>:"):
+                self.err(no, f"chunk 名 {name!r} 含非法字符（<>:）")
+                return None
+        return ns_join(self.ns, name) if "::" not in name else name
 
     # ------------------------------------------------ file 体
 
@@ -354,12 +578,7 @@ class Parser:
         return None
 
     def _file_line(self, no, raw):
-        try:
-            ln = strip_comment(raw, no)
-        except NWError as e:
-            self.err(no, e.msg)
-            ln = raw
-        t = ln.strip()
+        t = self._strip(no, raw)
         if RE_CLOSE.match(t):
             self._close_block(no)
             return
@@ -387,7 +606,7 @@ class Parser:
             else:
                 node = self.block[-1][1]
                 for nm in RE_ONE_INST.findall(t):
-                    node.body.append(Inst(nm, tuple(self.ns), no))
+                    node.body.append(Inst(nm, tuple(self.ns), no, self.fname))
         if popped:
             if popped > len(self.ns):
                 self.err(no, "~:: 没有对应的开层")
@@ -497,48 +716,134 @@ class Document:
         self.chunks = self.p.chunks
         self.dirs = self.p.dirs
         self.files = self.p.files
+        self.parts = self.p.parts
+        self.book = self.p.book
+        self.order = []
         self.errors = list(self.p.errors)
         self.warnings = list(self.p.warnings)
 
     @classmethod
     def from_files(cls, paths):
-        """多篇合并成一份文档：chunk 表、dir/file 树、命名空间表都并起来。"""
+        """两遍：每篇独立 parse，再按书的先序并成一份文档。"""
         docs = []
         for path in paths:
             with open(path, encoding="utf-8") as fh:
                 docs.append(cls(fh.read(), path))
-        if len(docs) == 1:
-            return docs[0]
         d = cls.__new__(cls)
-        d.fname = paths[0]
-        d.p = docs[0].p
-        d.chunks = {}
-        d.dirs = {}
-        d.files = {}
-        d.errors = []
-        d.warnings = []
+        d.fname = docs[0].fname if docs else ""
+        d.p = docs[0].p if docs else None
+        d.chunks, d.dirs, d.files = {}, {}, {}
+        d.parts = {}
+        d.book = BookDef()
+        d.order = []
+        d.errors, d.warnings = [], []
+        # 一、清单先合：书只能一本，部按名字合并，kids 按篇序接在后面。
         for sub in docs:
-            for k, v in sub.chunks.items():
-                if k in d.chunks:
-                    d.errors.append(
-                        f"{sub.fname}:{v.no}: chunk {k} 在两篇里都实现了"
-                        f"（{d.chunks[k].no} 行也有一个）")
-                else:
-                    d.chunks[k] = v
-            for k, v in sub.dirs.items():
-                if k in d.dirs and d.dirs[k].mounts:
-                    d.errors.append(f"{sub.fname}:0: dir {k} 在两篇里都定义过")
-                else:
-                    d.dirs.setdefault(k, v)
-            for k, v in sub.files.items():
-                if k in d.files and d.files[k].body:
-                    d.errors.append(f"{sub.fname}:{v.no}: file {k[0]}<{k[1]}> 在两篇里都定义过")
-                else:
-                    d.files.setdefault(k, v)
-            d.p.ns_decls |= sub.p.ns_decls
             d.errors += sub.errors
             d.warnings += sub.warnings
+            b = sub.book
+            if b.name:
+                if not d.book.name:
+                    d.book = b
+                elif d.book.name != b.name:
+                    d.errors.append(
+                        f"{sub.fname}:{b.no}: 一本书只能有一个 book 定义：{d.book.name} 与 {b.name}")
+                elif d.book.declared and b.declared:
+                    d.errors.append(f"{sub.fname}:{b.no}: book 重复定义：{b.name}")
+                else:
+                    d.book.declared = d.book.declared or b.declared
+                    d.book.touched = True
+                    d.book.kids += b.kids
+                    if not d.book.title:
+                        d.book.title = b.title
+                    if not d.book.end_no:
+                        d.book.end_no = b.end_no
+            for name, p in sub.parts.items():
+                slot = d.parts.get(name)
+                if slot is None:
+                    d.parts[name] = p
+                    continue
+                if slot.declared and p.declared:
+                    d.errors.append(f"{sub.fname}:{p.no}: part 重复定义：{name}")
+                slot.declared = slot.declared or p.declared
+                slot.touched = True
+                if not slot.title:
+                    slot.title = p.title
+                slot.kids += p.kids
+                if p.end_no:
+                    slot.end_no = p.end_no
+        if not d.book.name:
+            d.errors.append(f"{d.fname}:0: 没有 book 定义：一本书从 book 开始")
+            return d
+        # 二、先序展开成唯一的 order。
+        d.order = d._expand_book()
+        # 三、按篇序并物理树。没被书收的篇不进 AST：它不属于这本书。
+        by_file = {sub.fname: sub for sub in docs}
+        seen = set()
+        for src in d.order:
+            if src in seen:
+                d.errors.append(f"{d.book.no}: 同一篇被收了两次：{src}")
+                continue
+            seen.add(src)
+            sub = by_file.get(src)
+            if sub is None:
+                d.errors.append(f"{d.book.no}: book 收了这一篇，但输入里没有：{src}")
+                continue
+            d._merge_one(sub)
         return d
+
+    def _expand_book(self):
+        order = []
+        open_names = set()
+
+        def walk(kids):
+            for k in kids:
+                if not k.is_part:
+                    order.append(k.key)
+                    continue
+                p = self.parts.get(k.key)
+                if p is None:
+                    self.errors.append(f"{k.fname or self.fname}:{k.no}: 引用了没有定义的 part：{k.key}")
+                    continue
+                if k.key in open_names:
+                    self.errors.append(f"{k.fname or self.fname}:{k.no}: part 成环：{k.key}")
+                    continue
+                open_names.add(k.key)
+                walk(p.kids)
+                open_names.discard(k.key)
+
+        walk(self.book.kids)
+        return order
+
+    def _merge_one(self, sub):
+        for k, v in sub.chunks.items():
+            if k in self.chunks:
+                self.errors.append(
+                    f"{sub.fname}:{v.no}: chunk {k} 在两篇里都实现了")
+            else:
+                self.chunks[k] = v
+        for k, v in sub.dirs.items():
+            slot = self.dirs.get(k)
+            if slot is None:
+                self.dirs[k] = v
+                continue
+            if slot.declared and v.declared:
+                self.errors.append(f"{sub.fname}:{v.no}: dir {k} 在两篇里都定义了")
+            slot.declared = slot.declared or v.declared
+            slot.touched = True
+            slot.mounts += v.mounts
+        for k, v in sub.files.items():
+            slot = self.files.get(k)
+            if slot is None:
+                self.files[k] = v
+                continue
+            if slot.declared and v.declared:
+                self.errors.append(f"{sub.fname}:{v.no}: file {k[0]}<{k[1] or ''}> 在两篇里都定义了")
+            slot.declared = slot.declared or v.declared
+            slot.touched = True
+            slot.body += v.body
+        if self.p is not None and sub.p is not None:
+            self.p.ns_decls |= sub.p.ns_decls
 
     def resolve(self, name, ns):
         """名字解析：显式全名直接查；短名拼当前 ns。不回退。"""
@@ -558,14 +863,18 @@ class Document:
             for mt in d.mounts:
                 if mt.kind == "dir":
                     if mt.name not in self.dirs:
-                        self.dirs[mt.name] = DirNode(mt.name, [])
+                        self.dirs[mt.name] = DirNode(mt.name)
                 else:
                     key = (mt.name, mt.type)
                     if key not in self.files:
                         self.files[key] = FileNode(mt.name, mt.type, [])
-        # 2. top 必须存在
-        if "top" not in self.dirs:
-            self.errors.append(f"{self.fname}:0: 缺少 dir top（tangle 的根）")
+        # 2. top 必须存在，而且必须由 @ 建立
+        top = self.dirs.get("top")
+        if top is None:
+            self.errors.append(f"{self.fname}:0: 缺少 dir top @（tangle 的根只能由 @ 建立）")
+        elif not top.declared:
+            self.errors.append(
+                f"{self.fname}:0: top 必须先 dir top @（tangle 的根只能由 @ 建立）")
 
         # 3. 挂载唯一性：每个 dir/file 至多挂一次
         for d in self.dirs.values():
@@ -578,13 +887,13 @@ class Document:
         for name, d in self.dirs.items():
             if name == "top":
                 continue
-            if d.mounted == 0:
+            if d.mounted == 0 and d.touched:
                 self.warnings.append(f"{self.fname}:0: dir {name} 已定义但未挂载")
             elif d.mounted > 1:
                 self.errors.append(
                     f"{self.fname}:0: dir {name} 挂载了 {d.mounted} 次（声明位置唯一）")
         for (name, typ), f in self.files.items():
-            if f.mounted == 0:
+            if f.mounted == 0 and f.touched:
                 self.warnings.append(
                     f"{self.fname}:0: file {name}<{typ or '无类型'}> 已定义但未挂载")
             elif f.mounted > 1:
@@ -695,8 +1004,8 @@ class Document:
     def tangle(self, outdir):
         import os
         top = self.dirs.get("top")
-        if top is None:
-            raise NWError(0, "缺少 dir top")
+        if top is None or not top.declared:
+            raise NWError(0, "缺少 dir top @（tangle 的根只能由 @ 建立）")
         written = []
         self._tangle_dir(outdir, top, written)
         return written
@@ -709,16 +1018,16 @@ class Document:
                 if mt.name in self.dirs:
                     self._tangle_dir(os.path.join(path, mt.name),
                                      self.dirs[mt.name], written)
-            else:
-                if (mt.name, mt.type) not in self.files:
-                    continue
-                f = self.files[(mt.name, mt.type)]
-                base = mt.name + (TYPE_SUFFIX.get(mt.type, "") if mt.type else "")
-                full = os.path.join(path, base)
-                text = self.file_text(f)
-                with open(full, "w", encoding="utf-8") as fh:
-                    fh.write(text)
-                written.append(full)
+                continue
+            f = self.files.get((mt.name, mt.type))
+            if f is None or not f.touched:
+                continue                 # 没写内容：不落盘
+            base = mt.name + (TYPE_SUFFIX.get(mt.type, "") if mt.type else "")
+            full = os.path.join(path, base)
+            text = self.file_text(f)
+            with open(full, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            written.append(full)
 
     # ------------------------------------------------ ast（给 weave / IDE）
 
@@ -743,11 +1052,41 @@ class Document:
             f"{name}<{typ or ''}>": {"line": f.no, "insts": [i.name for i in f.body]}
             for (name, typ), f in self.files.items()
         }
+        parts = {
+            name: {
+                "title": p.title,
+                "kids": [
+                    {"kind": "part" if k.is_part else "essay", "name": k.key}
+                    for k in p.kids
+                ],
+            }
+            for name, p in self.parts.items()
+        }
+        instances = []
+        for (name, typ), f in self.files.items():
+            label = name + (f"<{typ}>" if typ else "")
+            nth = {}
+            for inst in f.body:
+                k = nth.get(inst.no, 0)
+                nth[inst.no] = k + 1
+                instances.append({
+                    "id": f"{label}#{inst.no}.{k}",
+                    "name": inst.name,
+                    "file": inst.fname or self.fname,
+                    "line": inst.no,
+                })
         return {
+            "book": {
+                "name": self.book.name,
+                "title": self.book.title or self.book.name,
+                "order": self.order,
+            },
+            "parts": parts,
             "chunks": chunks,
             "namespaces": sorted(self.p.ns_decls),
             "dirs": {n: dir_json(d) for n, d in self.dirs.items()},
             "files": files,
+            "instances": instances,
         }
 
 
@@ -755,7 +1094,7 @@ class Document:
 
 
 def main(argv):
-    if len(argv) < 3 or argv[1] not in ("check", "tangle", "ast"):
+    if len(argv) < 3 or argv[1] not in ("check", "tangle", "parse", "ast"):
         print(__doc__)
         return 2
     cmd = argv[1]
@@ -763,8 +1102,15 @@ def main(argv):
     outdir = None
     if "-o" in rest:
         i = rest.index("-o")
+        if i + 1 >= len(rest):
+            print("-o 后面要跟一个目录")
+            return 2
         outdir = rest[i + 1]
         rest = rest[:i] + rest[i + 2:]
+    ast = cmd == "ast"
+    if "--ast" in rest:
+        ast = True
+        rest = [a for a in rest if a != "--ast"]
     paths = rest
     if cmd == "tangle" and not outdir:
         print("tangle 需要 -o 输出目录")
@@ -787,8 +1133,12 @@ def main(argv):
         n_c = len(doc.chunks)
         print(f"ok：chunk {n_c} 个，file {n_f} 个，警告 {len(warnings)} 条")
         return 0
-    if cmd == "ast":
-        print(json.dumps(doc.ast(), ensure_ascii=False, indent=2))
+    if cmd == "parse" or cmd == "ast":
+        if ast:
+            print(json.dumps(doc.ast(), ensure_ascii=False, indent=2))
+        else:
+            title = doc.book.title or doc.book.name
+            print(f"书：{title}，收录 {len(doc.order)} 篇（输入 {len(paths)} 篇）")
         return 0
     written = doc.tangle(outdir)
     for w in written:

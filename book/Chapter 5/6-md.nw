@@ -13,7 +13,7 @@
 一眼看得出文件是谁的，也方便整章整章地搬走。路径从源路径来：剥掉开头的 `book/`，后缀换成 `.md`，其余一概不动。
 
 << md 的路 >>= @
-	// 目录名：`tangle/book.yaml` → `tangle`。vendor 与镜像目录都跟着它走，不跟着当前目录走。
+	// 路径里的目录部分：`Chapter 3/1-types.md` → `Chapter 3`。镜像目录按它建。
 	string dir_of(const string& path) {
 		size_t slash = path.find_last_of("/\\");
 		return slash == string::npos ? string() : path.substr(0, slash);
@@ -117,14 +117,21 @@
 铺开时每篇先建自己的目录——`write_file` 不会替你建父目录，`Chapter 3/1-types.md` 落到一个不存在的 `Chapter 3/` 里就是一个静默失败。
 
 << md 铺开 >>= @
+	// 部可以嵌套，标题层级跟着深度走；散篇没有部名，就只剩列表项。
+	void md_index_parts(std::ostringstream& out, const vector<Part>& parts, int level) {
+		int lv = level > 6 ? 6 : level;
+		for (const Part& p : parts) {
+			if (!p.title.empty()) out << string(static_cast<size_t>(lv), '#') << " " << p.title << "\n\n";
+			for (const string& f : p.files) out << "- [" << page_title(f) << "](" << md_path(f) << ")\n";
+			if (!p.files.empty()) out << "\n";
+			md_index_parts(out, p.kids, lv + 1);
+		}
+	}
+
 	string md_index(const Book& book) {
 		std::ostringstream out;
 		out << "# " << (book.title.empty() ? string("目录") : book.title) << "\n\n";
-		for (const Part& p : book.parts) {
-			out << "## " << p.title << "\n\n";
-			for (const string& f : p.files) out << "- [" << page_title(f) << "](" << md_path(f) << ")\n";
-			out << "\n";
-		}
+		md_index_parts(out, book.parts, 2);
 		return out.str();
 	}
 
@@ -159,7 +166,7 @@
 nw weave --markdown -o /tmp/md 篇...
 ```
 
-默认仍然是 HTML。为什么把 markdown 做成开关而不是另一个子命令：两条路的输入完全一样（同一份源、同一份目录），差别只在出口；拆成两个子命令，`-b`、`-o`、篇的列表都得各写一遍。
+默认仍然是 HTML。为什么把 markdown 做成开关而不是另一个子命令：两条路的输入完全一样（同一份源、同一本从 AST 里长出来的书），差别只在出口；拆成两个子命令，`-o` 与篇的列表都得各写一遍。
 
 `make web` 只出 HTML；markdown 那一路要显式要。
 

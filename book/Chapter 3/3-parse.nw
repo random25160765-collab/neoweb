@@ -13,13 +13,16 @@ file<cpp> parse @
 	<< 命名空间前缀 >>
 	<< 解析器状态 >>
 	<< 结构层的小工具 >>
+	<< 追加 >>
 	<< 结构层 >>
 	<< file 体 >>
+	<< 清单体 >>
 	<< chunk 体 >>
 	<< 剥缩进 >>
 	<< 入栈出栈 >>
 	<< 入口 >>
 	<< 合并多篇 >>
+	<< ast >>
 ~@
 
 ## 二、头
@@ -185,8 +188,9 @@ file<cpp> parse @
 
 << 解析器状态 >>= @
 	struct Frame {
-		char kind;     // 'd' dir / 'f' file / 'c' chunk
-		string name;   // dir 名 / file 键 / chunk 全名
+		char kind;     // 'd' dir / 'f' file / 'c' chunk / 'p' part / 'b' book
+		string name;   // dir 名 / file 键 / chunk 全名 / part 名 / book 名
+		int line = 0;  // 体从哪一行开始：闭合时记一段 span
 	};
 
 	struct Parser {
@@ -203,6 +207,16 @@ file<cpp> parse @
 		void struct_line(size_t no, const string& raw);
 		void file_line(size_t no, const string& raw);
 		void chunk_line(size_t no, const string& raw);
+		void list_body(size_t no, const string& raw);   // book/part 体：只收 part / essay / name
+		void open_dir(size_t no, const string& head, bool append);
+		void open_file(size_t no, const string& head, bool append);
+		void open_book(size_t no, const string& head, bool append);
+		void open_part(size_t no, const string& head, bool append);
+		void append_dir(size_t no, const string& parent, const string& stmt);
+		void append_file(size_t no, const string& head, const string& stmt);
+		void append_book(size_t no, const string& name, const string& stmt);
+		void append_part(size_t no, const string& name, const string& stmt);
+		void append_kid(vector<Kid>& kids, const string& stmt, size_t no);
 		void add_insts(size_t no, const vector<string>& names);
 		void add_lines(size_t no, const string& raw, const vector<string>& names);
 		void close_block(size_t no);
@@ -213,19 +227,190 @@ file<cpp> parse @
 		bool in_chunk() const { return !stack.empty() && stack.back().kind == 'c'; }
 		bool in_file() const { return !stack.empty() && stack.back().kind == 'f'; }
 		bool in_dir() const { return !stack.empty() && stack.back().kind == 'd'; }
+		bool in_list() const { return !stack.empty() && (stack.back().kind == 'b' || stack.back().kind == 'p'); }
 	};
 ~@
 
 全名怎么拼（`["a","b"]` + `"c"` → `a::b::c`）不在这里，在 `util.cpp` 的 `join_ns`：综合那一篇也要用它。
 
-## 七、结构层
+## 七、追加
+
+`@` 与 `+=` 只差一条：`@` 至多一次，`+=` 任意次。两者都能创建对象——第一次写 `+=` 不必先写一个空的 `@`。例外只有一个：`top` 是保留词，必须先 `dir top @`，这条在合并之后检查（`@` 可能写在后面的篇里）。
+
+两个标志因此必须分开：`declared` 记"有过 `@`"（判重复），`touched` 记"有过 `@` 或 `+=`"（判落盘）。合成一个标志，要么放不过第二次 `@`，要么画不出只有 `+=` 的对象。
+
+`+=` 后面可以跟一个体，也可以跟一条单行糖。糖只接一个目标：`dir X += dir Y;`、`file<c> X += << chunk >>;`。多个目标就用体，别让"按行追加"和"按体追加"挤在同一行。
+
+<< 追加 >>= @
+	// 一个容器的第一次出现：记源位置；之后的 += 只往它身上加东西。
+	void Parser::open_dir(size_t no, const string& head, bool append) {
+		string rest;
+		if (!after_kw(head, "dir", rest) || rest.empty()) throw Error(file, no, "dir 写法不对：" + head);
+		DirNode& d = doc.dirs[rest];
+		bool first = !d.touched;
+		if (!append) {
+			if (d.declared) throw Error(file, no, "dir 重复定义：" + rest);
+			d.declared = true;
+		}
+		d.touched = true;
+		if (first) {
+			d.name = rest;
+			d.src_file = file;
+			d.line = static_cast<int>(no);
+		}
+		stack.push_back({'d', rest, static_cast<int>(no)});
+	}
+
+	void Parser::open_file(size_t no, const string& head, bool append) {
+		string name, type;
+		if (!read_file_head(head, name, type, 0)) throw Error(file, no, "file 写法不对");
+		string key = file_key(name, type);
+		FileNode& f = doc.files[key];
+		bool first = !f.touched;
+		if (!append) {
+			if (f.declared) throw Error(file, no, "file 重复定义：" + name);
+			f.declared = true;
+		}
+		f.touched = true;
+		if (first) {
+			f.name = name;
+			f.type = type;
+			f.src_file = file;
+			f.line = static_cast<int>(no);
+		}
+		stack.push_back({'f', key, static_cast<int>(no)});
+	}
+
+	// 一本书只能有一个名字：第二次写别的名字不是追加，是另一本书。
+	void Parser::open_book(size_t no, const string& head, bool append) {
+		string rest;
+		if (!after_kw(head, "book", rest) || rest.empty()) throw Error(file, no, "book 写法不对：" + head);
+		BookDef& b = doc.book;
+		if (!b.name.empty() && b.name != rest)
+			throw Error(file, no, "一本书只能有一个 book 定义：" + b.name + " 与 " + rest);
+		if (!append) {
+			if (b.declared) throw Error(file, no, "book 重复定义：" + rest);
+			b.declared = true;
+		}
+		if (b.name.empty()) {
+			b.name = rest;
+			b.src_file = file;
+			b.line = static_cast<int>(no);
+		}
+		b.touched = true;
+		stack.push_back({'b', rest, static_cast<int>(no)});
+	}
+
+	void Parser::open_part(size_t no, const string& head, bool append) {
+		string rest;
+		if (!after_kw(head, "part", rest) || rest.empty()) throw Error(file, no, "part 写法不对：" + head);
+		PartDef& p = doc.parts[rest];
+		bool first = !p.touched;
+		if (!append) {
+			if (p.declared) throw Error(file, no, "part 重复定义：" + rest);
+			p.declared = true;
+		}
+		p.touched = true;
+		if (first) {
+			p.name = rest;
+			p.src_file = file;
+			p.line = static_cast<int>(no);
+		}
+		stack.push_back({'p', rest, static_cast<int>(no)});
+	}
+
+	// dir X += dir Y; / dir X += file<c> Y;
+	void Parser::append_dir(size_t no, const string& parent, const string& stmt) {
+		if (stmt.empty()) throw Error(file, no, "+= 后面没有挂载");
+		DirNode& d = doc.dirs[parent];
+		bool first = !d.touched;
+		d.touched = true;
+		if (first) {
+			d.name = parent;
+			d.src_file = file;
+			d.line = static_cast<int>(no);
+		}
+		string rest;
+		if (after_kw(stmt, "dir", rest) && !rest.empty()) {
+			d.mounts.push_back({true, rest, "", static_cast<int>(no), file});
+			return;
+		}
+		string name, type;
+		if (after_kw(stmt, "file", rest) && read_file_head(stmt, name, type, 0)) {
+			if (!type.empty()) suffix_of(type);
+			d.mounts.push_back({false, name, type, static_cast<int>(no), file});
+			return;
+		}
+		throw Error(file, no, "dir 只能追加 dir 或 file：" + stmt);
+	}
+
+	// file<c> X += << chunk >>;
+	void Parser::append_file(size_t no, const string& head, const string& stmt) {
+		string name, type;
+		if (!read_file_head(head, name, type, 0)) throw Error(file, no, "file 写法不对");
+		string key = file_key(name, type);
+		FileNode& f = doc.files[key];
+		bool first = !f.touched;
+		f.touched = true;
+		if (first) {
+			f.name = name;
+			f.type = type;
+			f.src_file = file;
+			f.line = static_cast<int>(no);
+		}
+		vector<string> names;
+		if (!inst_line(trim(stmt), names) || names.size() != 1)
+			throw Error(file, no, "file 的 += 只接一个 chunk 实例：" + stmt);
+		Inst in;
+		in.name = names[0];
+		in.ns = ns;
+		in.file = file;
+		in.line = static_cast<int>(no);
+		f.body.push_back(in);
+	}
+
+	// book X += ... 只能追加到那本已经存在的书。
+	void Parser::append_book(size_t no, const string& name, const string& stmt) {
+		if (doc.book.name != name) throw Error(file, no, "+= 到不存在的 book：" + name);
+		append_kid(doc.book.kids, stmt, no);
+	}
+
+	// part X += ... 首次出现即创建：部在写它第一条 essay 的时候就算存在了。
+	void Parser::append_part(size_t no, const string& name, const string& stmt) {
+		PartDef& p = doc.parts[name];
+		bool first = !p.touched;
+		p.touched = true;
+		if (first) {
+			p.name = name;
+			p.src_file = file;
+			p.line = static_cast<int>(no);
+		}
+		append_kid(p.kids, stmt, no);
+	}
+
+	void Parser::append_kid(vector<Kid>& kids, const string& stmt, size_t no) {
+		string key;
+		if (kid_line(stmt + ";", "part", key)) {
+			kids.push_back({true, key, file, static_cast<int>(no)});
+			return;
+		}
+		if (kid_line(stmt + ";", "essay", key)) {
+			kids.push_back({false, key, file, static_cast<int>(no)});
+			return;
+		}
+		throw Error(file, no, "只能追加 part 或 essay：" + stmt);
+	}
+~@
+
+糖里的 `stmt` 不带分号（`split_tail` 已经削掉了），要复用 `kid_line` 就得把它补回去——`stmt + ";"`。这不是绕：`kid_line` 的判据是"关键字 + 收尾分号"，补回去比再造一个不带分号的版本少一条规则。
+
+## 八、结构层
 
 结构层是"不在任何 file 体、也不在 chunk 体"的地方：文档级，或某个 dir 体内。
 
 << 结构层 >>= @
 	void Parser::struct_line(size_t no, const string& raw) {
-		string ln = strip_comment(raw);
-		string t = trim(ln);
+		string t = trim(strip_comment(raw));
 		if (t.empty()) return;
 
 		if (t == "~@") { close_block(no); return; }
@@ -243,44 +428,13 @@ file<cpp> parse @
 			return;
 		}
 
-		// dir X @
-		if (has_prefix(t, "dir ") && t.back() == '@') {
-			string name = trim(t.substr(4, t.size() - 5));
-			DirNode& d = doc.dirs[name];
-			if (d.defined) throw Error(file, no, "dir 重复定义：" + name);
-			d.name = name;
-			d.defined = true;
-			d.src_file = file;
-			d.line = static_cast<int>(no);
-			stack.push_back({'d', name});
-			return;
-		}
-
-		// dir X;
+		// 挂载：dir X; / file<t> X;。它们没有 @，也没有 +=。
 		if (has_prefix(t, "dir ") && t.back() == ';') {
 			string name = trim(t.substr(4, t.size() - 5));
 			if (!in_dir()) throw Error(file, no, "挂载必须写在某个 dir 体内");
 			doc.dirs[top().name].mounts.push_back({true, name, "", static_cast<int>(no), file});
 			return;
 		}
-
-		// file<type> X @ / file X @
-		if (has_prefix(t, "file") && t.back() == '@') {
-			string name, type;
-			if (!read_file_head(t, name, type, '@')) throw Error(file, no, "file 写法不对");
-			string key = file_key(name, type);
-			FileNode& f = doc.files[key];
-			if (f.defined) throw Error(file, no, "file 重复定义：" + name);
-			f.name = name;
-			f.type = type;
-			f.defined = true;
-			f.src_file = file;
-			f.line = static_cast<int>(no);
-			stack.push_back({'f', key});
-			return;
-		}
-
-		// file<type> X;
 		if (has_prefix(t, "file") && t.back() == ';') {
 			string name, type;
 			if (!read_file_head(t, name, type, ';')) throw Error(file, no, "file 写法不对");
@@ -288,6 +442,32 @@ file<cpp> parse @
 			if (!type.empty()) suffix_of(type);
 			doc.dirs[top().name].mounts.push_back({false, name, type, static_cast<int>(no), file});
 			return;
+		}
+
+		// 定义与追加：X @ / X += @ / X += 语句;
+		string head, stmt, rest;
+		int tail = split_tail(t, head, stmt);
+		if (tail) {
+			if (after_kw(head, "dir", rest)) {
+				if (tail == 3) append_dir(no, rest, stmt);
+				else open_dir(no, head, tail == 2);
+				return;
+			}
+			if (after_kw(head, "file", rest)) {
+				if (tail == 3) append_file(no, head, stmt);
+				else open_file(no, head, tail == 2);
+				return;
+			}
+			if (after_kw(head, "book", rest)) {
+				if (tail == 3) append_book(no, rest, stmt);
+				else open_book(no, head, tail == 2);
+				return;
+			}
+			if (after_kw(head, "part", rest)) {
+				if (tail == 3) append_part(no, rest, stmt);
+				else open_part(no, head, tail == 2);
+				return;
+			}
 		}
 
 		// << X >>= @
@@ -303,7 +483,7 @@ file<cpp> parse @
 			c.line = static_cast<int>(no);
 			doc.chunks.push_back(c);
 			doc.index[full] = idx;
-			stack.push_back({'c', full});
+			stack.push_back({'c', full, static_cast<int>(no)});
 			return;
 		}
 
@@ -316,7 +496,20 @@ file<cpp> parse @
 << 结构层的小工具 >>= @
 	bool has_sep(const string& name) { return name.find("::") != string::npos; }
 
-	// file<type> 名字 @|;   类型可省。
+	bool ends_with(const string& s, const string& p) {
+		return s.size() >= p.size() && s.compare(s.size() - p.size(), p.size(), p) == 0;
+	}
+
+	// 关键字之后的部分。后面必须是空格或 '<'，否则 "directory" 也会命中 "dir"。
+	bool after_kw(const string& t, const string& kw, string& rest) {
+		if (!has_prefix(t, kw) || t.size() == kw.size()) return false;
+		char c = t[kw.size()];
+		if (c != ' ' && c != '<') return false;
+		rest = trim(t.substr(kw.size()));
+		return true;
+	}
+
+	// file<type> 名字 @|;   类型可省。end 为 0 表示不要求收尾标记（`+=` 的糖用）。
 	bool read_file_head(const string& t, string& name, string& type, char end) {
 		size_t i = 4;   // 跳过 "file"
 		if (i < t.size() && t[i] == '<') {
@@ -326,13 +519,48 @@ file<cpp> parse @
 			i = e + 1;
 		}
 		string rest = trim(t.substr(i));
-		if (rest.empty() || rest.back() != end) return false;
-		name = trim(rest.substr(0, rest.size() - 1));
+		if (end) {
+			if (rest.empty() || rest.back() != end) return false;
+			rest = rtrim(rest.substr(0, rest.size() - 1));
+		}
+		name = rest;
 		return !name.empty() && name.find(' ') == string::npos;
+	}
+
+	// `part X;` / `essay p;` → key。
+	bool kid_line(const string& t, const string& kw, string& key) {
+		string rest;
+		if (!after_kw(t, kw, rest)) return false;
+		if (rest.empty() || rest.back() != ';') return false;
+		key = trim(rest.substr(0, rest.size() - 1));
+		return !key.empty();
+	}
+
+	// 一行的收尾：`X @`、`X += @`、`X += 语句;`。
+	// 0 = 都不是，1 = @，2 = += @，3 = += 语句（head 是左侧，body 是右侧）。
+	int split_tail(const string& t, string& head, string& body) {
+		if (t.size() >= 2 && t.back() == '@') {
+			string h = rtrim(t.substr(0, t.size() - 1));
+			if (ends_with(h, "+=")) {
+				head = rtrim(h.substr(0, h.size() - 2));
+				return 2;
+			}
+			head = h;
+			return 1;
+		}
+		if (!t.empty() && t.back() == ';') {
+			string h = rtrim(t.substr(0, t.size() - 1));
+			size_t p = h.rfind("+=");
+			if (p == string::npos) return 0;
+			head = rtrim(h.substr(0, p));
+			body = trim(h.substr(p + 2));
+			return 3;
+		}
+		return 0;
 	}
 ~@
 
-## 八、file 体
+## 九、file 体
 
 file 体里只允许三样：实例、命名空间引入、空行。别的都是错——产物内容属于 chunk，不属于接线。
 
@@ -377,7 +605,34 @@ file 体里只允许三样：实例、命名空间引入、空行。别的都是
 	}
 ~@
 
-## 九、chunk 体
+<< 清单体 >>= @
+	// book/part 的体：只收 part / essay，外加一行可选的 name。dir/file/chunk 在这里没有位置。
+	void Parser::list_body(size_t no, const string& raw) {
+		string t = trim(strip_comment(raw));
+		if (t.empty()) return;
+		if (t == "~@") { close_block(no); return; }
+		string key;
+		vector<Kid>& kids = top().kind == 'b' ? doc.book.kids : doc.parts[top().name].kids;
+		if (kid_line(t, "part", key)) {
+			kids.push_back({true, key, file, static_cast<int>(no)});
+			return;
+		}
+		if (kid_line(t, "essay", key)) {
+			kids.push_back({false, key, file, static_cast<int>(no)});
+			return;
+		}
+		if (kid_line(t, "name", key)) {
+			if (top().kind == 'b') doc.book.title = key;
+			else doc.parts[top().name].title = key;
+			return;
+		}
+		throw Error(file, no, "清单里只能写 part / essay / name：" + t);
+	}
+~@
+
+清单的体是清单，不是接线：`part` 只能挂在 book 或另一个 part 下，`essay` 只能挂在两者之下，`name` 给 book 与 part 各起一个人看的标题。写别的就是错——这棵树里没有"产物内容"这一说。
+
+## 十、chunk 体
 
 chunk 体不剥注释（块内是代码），只有围栏例外。
 
@@ -434,7 +689,7 @@ chunk 体不剥注释（块内是代码），只有围栏例外。
 	}
 ~@
 
-## 十、剥缩进
+## 十一、剥缩进
 
 最小公共缩进：代码行与字面行按行首空白算，实例行按自己的缩进算。三者一起找出最小值，然后一起剥。
 
@@ -467,7 +722,7 @@ chunk 体不剥注释（块内是代码），只有围栏例外。
 	}
 ~@
 
-## 十一、入栈出栈
+## 十二、入栈出栈
 
 << 入栈出栈 >>= @
 	// prefix 可能是 "a::"、"a::b::"，也可能是 "a::b"：两头都认，末尾的 :: 当作"到此为止"。
@@ -505,11 +760,24 @@ chunk 体不剥注释（块内是代码），只有围栏例外。
 				if (t == "@todo" || t == "@todo:") { c.todo = true; c.lines.erase(c.lines.begin()); }
 			}
 			dedent(c);
-		} else if (f.kind == 'f') {
-			doc.files[f.name].end_line = static_cast<int>(no);
-		} else {
-			doc.dirs[f.name].end_line = static_cast<int>(no);
+			return;
 		}
+		// 分片要各记一段：一个对象在同一篇里可能有好几个体，weave 得把它们各自摆回原文。
+		if (f.kind == 'f') {
+			FileNode& x = doc.files[f.name];
+			x.end_line = static_cast<int>(no);
+			x.spans.push_back({f.line, static_cast<int>(no)});
+			return;
+		}
+		if (f.kind == 'd') {
+			DirNode& x = doc.dirs[f.name];
+			x.end_line = static_cast<int>(no);
+			x.spans.push_back({f.line, static_cast<int>(no)});
+			return;
+		}
+		// 清单体不落盘，但 weave 要按原文摆回散文之间，所以也要记一段 span。
+		if (f.kind == 'b') doc.book.spans.push_back({f.line, static_cast<int>(no)});
+		if (f.kind == 'p') doc.parts[f.name].spans.push_back({f.line, static_cast<int>(no)});
 	}
 ~@
 
@@ -517,7 +785,7 @@ chunk 体不剥注释（块内是代码），只有围栏例外。
 
 `close_block` 里记下 `end_line` 是解析器替 weave 做的一件事。综合不需要它——`~@` 对 tangle 只是"体到此为止"；展开需要它，因为那一页要把散文与块按原文顺序交错排出来，必须知道"这块吃到第几行，之后回到散文"。剥缩进会顺手删掉体首尾的空行，所以不能靠行号集合反推范围，只能记这个显式的结束标记。
 
-## 十二、入口
+## 十三、入口
 
 << 入口 >>= @
 	void Parser::run() {
@@ -544,6 +812,7 @@ chunk 体不剥注释（块内是代码），只有围栏例外。
 
 		if (in_chunk()) chunk_line(no, raw);
 		else if (in_file()) file_line(no, raw);
+		else if (in_list()) list_body(no, raw);
 		else struct_line(no, raw);
 	}
 
@@ -564,38 +833,250 @@ chunk 体不剥注释（块内是代码），只有围栏例外。
 	}
 ~@
 
-## 十三、合并多篇
+## 十四、合并多篇
 
 一本书拆成多篇，每篇独立解析（行号、命名空间都不跨篇），最后把表和树并起来。
 
 并的规则只有一条：**同一个名字在两篇里都出现，就是错**。v2 允许"占位接真定义"，v3 没有占位，所以重名必须报。
 
 << 合并多篇 >>= @
+	// 先序展开：容器体是一个有序列表，part 展开时先展开它的子项。
+	// 页序、装配序、分片顺序都是这一次展开的结果——三处共用一个 order。
+	void expand_kids(const vector<Kid>& kids, const map<string, PartDef>& parts, vector<string>& order,
+	                 set<string>& open) {
+		for (const Kid& k : kids) {
+			if (!k.is_part) {
+				order.push_back(k.key);
+				continue;
+			}
+			auto it = parts.find(k.key);
+			if (it == parts.end())
+				throw Error(k.src_file, k.line, "引用了没有定义的 part：" + k.key);
+			if (!open.insert(k.key).second) throw Error(k.src_file, k.line, "part 成环：" + k.key);
+			expand_kids(it->second.kids, parts, order, open);
+			open.erase(k.key);
+		}
+	}
+
+	// 一篇并进来：表里的名字不许撞，树里的分片按篇序接在后面。
+	void merge_one(Document& out, Document& d) {
+		for (auto& c : d.chunks) {
+			if (out.index.count(c.name))
+				throw Error(c.src_file, c.line, "chunk 在两篇里都实现了：" + c.name);
+			out.index[c.name] = out.chunks.size();
+			out.chunks.push_back(c);
+		}
+		for (auto& kv : d.dirs) {
+			DirNode& slot = out.dirs[kv.first];
+			DirNode& in = kv.second;
+			if (slot.declared && in.declared)
+				throw Error(d.main_file, in.line, "dir 在两篇里都定义了：" + kv.first);
+			slot.declared = slot.declared || in.declared;
+			if (!slot.touched) {
+				slot.name = in.name;
+				slot.src_file = in.src_file;
+				slot.line = in.line;
+			}
+			slot.touched = true;
+			slot.mounts.insert(slot.mounts.end(), in.mounts.begin(), in.mounts.end());
+			slot.spans.insert(slot.spans.end(), in.spans.begin(), in.spans.end());
+			slot.end_line = in.end_line;
+		}
+		for (auto& kv : d.files) {
+			FileNode& slot = out.files[kv.first];
+			FileNode& in = kv.second;
+			if (slot.declared && in.declared)
+				throw Error(d.main_file, in.line, "file 在两篇里都定义了：" + kv.first);
+			slot.declared = slot.declared || in.declared;
+			if (!slot.touched) {
+				slot.name = in.name;
+				slot.type = in.type;
+				slot.src_file = in.src_file;
+				slot.line = in.line;
+			}
+			slot.touched = true;
+			slot.body.insert(slot.body.end(), in.body.begin(), in.body.end());
+			slot.spans.insert(slot.spans.end(), in.spans.begin(), in.spans.end());
+			slot.end_line = in.end_line;
+		}
+		out.namespaces.insert(d.namespaces.begin(), d.namespaces.end());
+	}
+
 	Document merge(vector<Document> docs) {
 		Document out;
+		// 一、清单先合：书只能一本，部按名字合并，kids 按篇序接在后面。
 		for (auto& d : docs) {
 			if (out.main_file.empty()) out.main_file = d.main_file;
-			for (auto& c : d.chunks) {
-				if (out.index.count(c.name))
-					throw Error(c.src_file, c.line, "chunk 在两篇里都实现了：" + c.name);
-				out.index[c.name] = out.chunks.size();
-				out.chunks.push_back(c);
+			if (!d.book.name.empty()) {
+				if (out.book.name.empty()) {
+					out.book = d.book;
+				} else {
+					if (out.book.name != d.book.name)
+						throw Error(d.book.src_file, d.book.line,
+						            "一本书只能有一个 book 定义：" + out.book.name + " 与 " + d.book.name);
+					if (out.book.declared && d.book.declared)
+						throw Error(d.book.src_file, d.book.line, "book 重复定义：" + d.book.name);
+					out.book.declared = out.book.declared || d.book.declared;
+					out.book.touched = true;
+					out.book.kids.insert(out.book.kids.end(), d.book.kids.begin(), d.book.kids.end());
+					out.book.spans.insert(out.book.spans.end(), d.book.spans.begin(), d.book.spans.end());
+					if (out.book.title.empty()) out.book.title = d.book.title;
+				}
 			}
-			for (auto& kv : d.dirs) {
-				DirNode& slot = out.dirs[kv.first];
-				if (slot.defined && kv.second.defined)
-					throw Error(d.main_file, kv.second.line, "dir 在两篇里都定义了：" + kv.first);
-				if (kv.second.defined) slot = kv.second;
+			for (auto& kv : d.parts) {
+				PartDef& slot = out.parts[kv.first];
+				PartDef& in = kv.second;
+				if (slot.declared && in.declared)
+					throw Error(in.src_file, in.line, "part 重复定义：" + kv.first);
+				slot.declared = slot.declared || in.declared;
+				if (!slot.touched) {
+					slot.name = in.name;
+					slot.title = in.title;
+					slot.src_file = in.src_file;
+					slot.line = in.line;
+				}
+				if (slot.title.empty()) slot.title = in.title;
+				slot.touched = true;
+				slot.kids.insert(slot.kids.end(), in.kids.begin(), in.kids.end());
+				slot.spans.insert(slot.spans.end(), in.spans.begin(), in.spans.end());
 			}
-			for (auto& kv : d.files) {
-				FileNode& slot = out.files[kv.first];
-				if (slot.defined && kv.second.defined)
-					throw Error(d.main_file, kv.second.line, "file 在两篇里都定义了：" + kv.first);
-				if (kv.second.defined) slot = kv.second;
-			}
-			out.namespaces.insert(d.namespaces.begin(), d.namespaces.end());
 		}
+		if (out.book.name.empty()) throw Error(out.main_file, 0, "没有 book 定义：一本书从 book 开始");
+		// 二、先序展开成唯一的 order。
+		set<string> open;
+		expand_kids(out.book.kids, out.parts, out.order, open);
+		set<string> seen;
+		for (const string& src : out.order)
+			if (!seen.insert(src).second)
+				throw Error(out.book.src_file, 0, "同一篇被收了两次：" + src);
+		// 三、按篇序并物理树。没被书收的篇不进 AST：它不属于这本书。
+		map<string, Document*> by_file;
+		for (auto& d : docs) by_file[d.main_file] = &d;
+		for (const string& src : out.order) {
+			auto it = by_file.find(src);
+			if (it == by_file.end())
+				throw Error(out.book.src_file, 0, "book 收了这一篇，但输入里没有：" + src);
+			merge_one(out, *it->second);
+		}
+		// 四、top 的例外：它是根，必须由 @ 建立。
+		auto top = out.dirs.find("top");
+		if (top != out.dirs.end() && !top->second.declared)
+			throw Error(top->second.src_file, top->second.line, "top 必须先 dir top @");
 		return out;
+	}
+~@
+
+并的顺序就是 `order` 的顺序，不是命令行给的顺序。这条把"篇写在哪"与"篇排在哪"彻底分开：前者是文件系统，后者是书。
+
+<< ast >>= @
+	// JSON 里只有三种字符要照顾：引号、反斜杠、控制字符。
+	string json_str(const string& s) {
+		string out = "\"";
+		for (char c : s) {
+			unsigned char u = static_cast<unsigned char>(c);
+			if (c == '"' || c == '\\') {
+				out.push_back('\\');
+				out.push_back(c);
+			} else if (c == '\n') {
+				out += "\\n";
+			} else if (c == '\t') {
+				out += "\\t";
+			} else if (u < 0x20) {
+				const char* hex = "0123456789abcdef";
+				out += "\\u00";
+				out.push_back(hex[(u >> 4) & 0xF]);
+				out.push_back(hex[u & 0xF]);
+			} else {
+				out.push_back(c);
+			}
+		}
+		out.push_back('"');
+		return out;
+	}
+
+	// 装配清单：给 IDE 与脚本看的同一份 AST。键都是确定的，不按 map 的迭代顺序赌运气——
+	// dirs/files/chunks 来自 map 或 vector，顺序稳定；instances 按 file 分组，组内按接线顺序。
+	string ast_json(const Document& doc) {
+		std::ostringstream o;
+		o << "{\n";
+		o << "  \"book\": {\"name\": " << json_str(doc.book.name) << ", \"title\": "
+		  << json_str(doc.book.title.empty() ? doc.book.name : doc.book.title) << ", \"order\": [";
+		for (size_t i = 0; i < doc.order.size(); ++i) o << (i ? ", " : "") << json_str(doc.order[i]);
+		o << "]},\n";
+
+		o << "  \"parts\": {";
+		bool first = true;
+		for (const auto& kv : doc.parts) {
+			o << (first ? "" : ", ") << json_str(kv.first) << ": {\"title\": "
+			  << json_str(kv.second.title) << ", \"kids\": [";
+			const vector<Kid>& kids = kv.second.kids;
+			for (size_t i = 0; i < kids.size(); ++i)
+				o << (i ? ", " : "") << "{\"kind\": " << json_str(kids[i].is_part ? "part" : "essay")
+				  << ", \"name\": " << json_str(kids[i].key) << "}";
+			o << "]}";
+			first = false;
+		}
+		o << "},\n";
+
+		o << "  \"chunks\": {";
+		first = true;
+		for (const Chunk& c : doc.chunks) {
+			o << (first ? "" : ", ") << json_str(c.name) << ": {\"line\": " << c.line << ", \"insts\": [";
+			bool inner = true;
+			for (const Line& ln : c.lines)
+				if (ln.kind == Line::Inst) {
+					o << (inner ? "" : ", ") << json_str(ln.name);
+					inner = false;
+				}
+			o << "]}";
+			first = false;
+		}
+		o << "},\n";
+
+		o << "  \"dirs\": {";
+		first = true;
+		for (const auto& kv : doc.dirs) {
+			o << (first ? "" : ", ") << json_str(kv.first) << ": {\"mounts\": [";
+			const vector<Mount>& ms = kv.second.mounts;
+			for (size_t i = 0; i < ms.size(); ++i)
+				o << (i ? ", " : "") << "{\"kind\": " << json_str(ms[i].is_dir ? "dir" : "file")
+				  << ", \"name\": " << json_str(ms[i].name) << ", \"type\": " << json_str(ms[i].type)
+				  << ", \"line\": " << ms[i].line << "}";
+			o << "]}";
+			first = false;
+		}
+		o << "},\n";
+
+		o << "  \"files\": {";
+		first = true;
+		for (const auto& kv : doc.files) {
+			const FileNode& f = kv.second;
+			string label = f.type.empty() ? f.name : f.name + "<" + f.type + ">";
+			o << (first ? "" : ", ") << json_str(label) << ": {\"line\": " << f.line << ", \"insts\": [";
+			for (size_t i = 0; i < f.body.size(); ++i) o << (i ? ", " : "") << json_str(f.body[i].name);
+			o << "]}";
+			first = false;
+		}
+		o << "},\n";
+
+		// 实例 id：file#line.k。行号与"这一行的第几个"都是确定的，所以可以 diff、可以回指。
+		o << "  \"instances\": [";
+		first = true;
+		for (const auto& kv : doc.files) {
+			const FileNode& f = kv.second;
+			string label = f.type.empty() ? f.name : f.name + "<" + f.type + ">";
+			map<int, int> nth;
+			for (const Inst& in : f.body) {
+				int k = nth[in.line]++;
+				o << (first ? "" : ", ")
+				  << "{\"id\": " << json_str(label + "#" + std::to_string(in.line) + "." + std::to_string(k))
+				  << ", \"name\": " << json_str(in.name) << ", \"file\": " << json_str(in.file)
+				  << ", \"line\": " << in.line << "}";
+				first = false;
+			}
+		}
+		o << "]\n}\n";
+		return o.str();
 	}
 
 	}  // namespace nw

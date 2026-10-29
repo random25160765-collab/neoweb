@@ -41,11 +41,11 @@ C 程序要说话，先得 `#include`。它单独成块，因为"用了哪些库
 ## 四、它证明什么
 
 ```
-nw tangle -o /tmp/ex book/skeleton.nw "book/Appendix B/hello.nw"
+find book -name '*.nw' -print0 | xargs -0 nw tangle -o /tmp/ex
 cc -o /tmp/ex/hello /tmp/ex/examples/hello.c && /tmp/ex/hello
 ```
 
-两件事都值得看一眼：`tangle` 要带上骨架篇（位置在那里声明），而产物落在 `examples/` 下（挂载说的），不在输出根上。
+两件事都值得看一眼：`tangle` 收的是**整本书**——顺序由 `book` 定，`find` 那一句只负责说"有哪些篇"；而产物落在 `examples/` 下（挂载说的），不在输出根上。多铺出来的那些文件与这个例子无关，你只看 `examples/hello.c` 就行。
 
 一块代码也能是一个完整程序。语法的最小面比它能做的事小得多——这是它敢叫"语法"而不是"框架"的原因。
 

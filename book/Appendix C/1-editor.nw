@@ -209,7 +209,7 @@ file<js> gen-grammar @
 
 `autoClosingPairs` 里也不写 `<<`/`>>`：写 C 时 `a << b` 会被自动补成 `a << b >>`，比不补更烦人。**配对高亮与自动补全是两件事**，前者只管颜色，后者会改文本。
 
-折叠标记按 v3 的三类块各写一条：块头 `<< 名字 >>= @`、`file`/`dir` 定义、`!!` 命名空间；收尾分别是 `~@` 与 `~::`。
+折叠标记按 v3 的四类块各写一条：块头 `<< 名字 >>= @`、`file`/`dir`/`book`/`part` 定义（含 `+=` 那一半）、`!!` 命名空间；收尾分别是 `~@` 与 `~::`。
 
 << 语言配置 >>= @
 	{
@@ -238,7 +238,7 @@ file<js> gen-grammar @
 	  ],
 	  "folding": {
 	    "markers": {
-	      "start": "^(\\s*)(<<[^<>]*>>\\s*=\\s*@|(?:file|dir)\\b[^@;]*@|[!]{2}\\s*$)\\s*$",
+	      "start": "^(\\s*)(<<[^<>]*>>\\s*=\\s*@|(?:file|dir|book|part)\\b[^@;]*@|[!]{2}\\s*$)\\s*$",
 	      "end": "^(\\s*)(~@|~::)\\s*$"
 	    }
 	  }
@@ -247,7 +247,9 @@ file<js> gen-grammar @
 
 ## 四、片段
 
-v3 有五种头，五种模板。片段的作用不是省字，是**让作者每次都写对**：体内缩进一级、`@` 前留一个空格、`~@` 顶格。
+v3 有七种头，七种模板。片段的作用不是省字，是**让作者每次都写对**：体内缩进一级、`@` 前留一个空格、`~@` 顶格。
+
+`+=` 的两种写法各有一个片段：带体的（`fileapp` / `dirapp`）与单行糖（`append`）。糖只接一个目标，所以片段里只留一个占位——想追加第二个，再敲一遍片段比手改更不容易错。
 
 << 片段 >>= @
 	{
@@ -265,6 +267,36 @@ v3 有五种头，五种模板。片段的作用不是省字，是**让作者每
 	    "prefix": "dir",
 	    "body": ["dir ${1:name} @", "\t$0", "~@"],
 	    "description": "目录：只装挂载"
+	  },
+	  "book": {
+	    "prefix": "book",
+	    "body": ["book ${1:name} @", "\tname ${2:title};", "\tpart ${3:first};", "\tessay ${4:path};", "~@"],
+	    "description": "书：全项目只有一本，先序就是页序与装配序"
+	  },
+	  "part": {
+	    "prefix": "part",
+	    "body": ["part ${1:name} @", "\tname ${2:title};", "\t$0", "~@"],
+	    "description": "部：体里可以再放 part 与 essay"
+	  },
+	  "essay": {
+	    "prefix": "essay",
+	    "body": ["essay ${1:path};"],
+	    "description": "散篇：书或部里收一篇 .nw"
+	  },
+	  "fileapp": {
+	    "prefix": "fileapp",
+	    "body": ["file<${1:cpp}> ${2:name} += @", "\t$0", "~@"],
+	    "description": "追加接线：往已有的产物后面接一段"
+	  },
+	  "dirapp": {
+	    "prefix": "dirapp",
+	    "body": ["dir ${1:name} += @", "\t$0", "~@"],
+	    "description": "追加目录：往已有的目录里再挂几样"
+	  },
+	  "append": {
+	    "prefix": "append",
+	    "body": ["${1:dir} ${2:name} += ${3:dir} ${4:target};"],
+	    "description": "单行追加：+= 后面只跟一个目标"
 	  },
 	  "mount": {
 	    "prefix": "mount",
@@ -291,7 +323,9 @@ v3 有五种头，五种模板。片段的作用不是省字，是**让作者每
 1. **捕获组按序号编号。** 一条块头的正则里有七八个括号，哪个是 `<<`、哪个是名字，全靠 `captures` 里的数字。手写时改正则就得重数一遍，错一个数字不会报错，只会把名字染成标点。
 2. **产物要能对账。** JSON 由脚本算出来，就永远和书一致；手写的那份迟早是"某次改了源忘了改产物"。
 
-**语言不在这里。** 这一层只认结构：`<<…>>= @`、`file…@`、`dir…@`、`!!…`、`~::`、`~@`、`<<…>>`、`%%…%%`、`@todo`。理由很硬：C++ 的 `namespace nw {` 会一直开到某个 `}`，区域一开，我们的 `~@` 就落在别人的区域里，而 TextMate 没有"这不合法、退回上一层"的纠错——一个没闭合的区域能把后面整章正文都吃成 C++。所以块体交给下一节的解析层，它自己数块头，知道块在哪里结束。
+**语言不在这里。** 这一层只认结构：`<<…>>= @`、`file…@`、`dir…@`、`book…@`、`part…@`、它们的 `+=` 写法与单行糖、`!!…`、`~::`、`~@`、`<<…>>`、`%%…%%`、`@todo`。理由很硬：C++ 的 `namespace nw {` 会一直开到某个 `}`，区域一开，我们的 `~@` 就落在别人的区域里，而 TextMate 没有"这不合法、退回上一层"的纠错——一个没闭合的区域能把后面整章正文都吃成 C++。所以块体交给下一节的解析层，它自己数块头，知道块在哪里结束。
+
+两种 `+=` 在语法层是不同的规则：`X += @` 是一个区域（体到 `~@`），`X += 目标;` 是一行（到 `;` 就完）。把它们写成一条，糖行会开出一个永远等不到 `~@` 的区域——表现是"从这一行起，后面全变成接线色"，而且不会报错。
 
 两条区域规则各带一个容器名（`meta.block.chunk.nw`、`meta.block.wire.nw`）：它们不是给颜色用的，是给解析层用的——解析层靠它分清"这一行在块里还是在文件接线里"。
 
@@ -303,8 +337,21 @@ v3 有五种头，五种模板。片段的作用不是省字，是**让作者每
 	// 块头：1 空白 | 2 << | 3 名字 | 4 >> | 5 = | 6 空白 | 7 @ | 8 尾随
 	const head = `^(\\s*)(<<)([^<>\\n]+?)(>>)(=)([ \\t]*)(@)(\\s*)$`;
 
-	// 接线：1 空白 | 2 file 或 dir | 3 类型名 | 4 空白 | 5 名字 | 6 空白 | 7 @ | 8 尾随
-	const wire = `^(\\s*)(file|dir)(?:<([\\w-]+)>)?([ \\t]+)([^\\s@;]+)([ \\t]*)(@)(\\s*)$`;
+	// 接线：1 空白 | 2 关键字 | 3 类型名 | 4 空白 | 5 名字 | 6 空白 | 7 @ | 8 尾随
+	// 四种关键字同形：book 不落盘，但它和 dir/file 一样带一个 ~@ 收尾的体。
+	const wire = `^(\\s*)(file|dir|book|part)(?:<([\\w-]+)>)?([ \\t]+)([^\\s@;+]+)([ \\t]*)(@)(\\s*)$`;
+
+	// 追加头：1 空白 | 2 关键字 | 3 类型名 | 4 空白 | 5 名字 | 6 空白 | 7 += | 8 空白 | 9 @ | 10 尾随
+	// 与接线同形，只多一个 `+=`。名字里不许出现 `+`，否则 `name+` 会被当成追加。
+	const wireAdd = `^(\\s*)(file|dir|book|part)(?:<([\\w-]+)>)?([ \\t]+)([^\\s@;+]+)([ \\t]*)(\\+=)([ \\t]*)(@)(\\s*)$`;
+
+	// 追加的糖：`dir top += dir b;`、`file<c> x += << y >>;`、`book b += essay p;`
+	// 一行说完，没有体。它必须是独立规则：begin 里那个先行断言把 `+= @` 挡在外面，
+	// 否则一条糖行会开出一个永远等不到 `;` 的区域，把后面整章吃掉。
+	const appendLine = `^(\\s*)(file|dir|book|part)(?:<([\\w-]+)>)?([ \\t]+)([^\\s@;+]+)([ \\t]*)(\\+=)(?![ \\t]*@[ \\t]*$)`;
+
+	// 清单项（只在 book/part 的体里有）：`part x;`、`essay p;`、`name 标题;`
+	const listItem = `^(\\s*)(part|essay|name)([ \\t]+)([^;\\n]+)(;)(\\s*)$`;
 
 	// 挂载行（`file<json> package;`、`dir tools;`）只出现在目录区域**内部**。
 	// 它不能指望上面那条 begin 规则：区域一开，begin 就不再重测——所以挂载行原本
@@ -359,6 +406,8 @@ v3 有五种头，五种模板。片段的作用不是省字，是**让作者每
 	      { include: "#namespace" },
 	      { include: "#chunk" },
 	      { include: "#wire" },
+	      { include: "#wireAdd" },
+	      { include: "#appendLine" },
 	      { include: "#mount" },
 	      { include: "#ref" },
 	      { include: "text.html.markdown" }
@@ -376,7 +425,26 @@ v3 有五种头，五种模板。片段的作用不是省字，是**让作者每
 	    begin: wire,
 	    beginCaptures: { 2: cap.mark, 3: cap.type, 5: cap.file, 7: cap.mark },
 	    ...until,
-	    patterns: [{ include: "#mount" }, { include: "#ref" }]
+	    patterns: [{ include: "#mount" }, { include: "#listItem" }, { include: "#ref" }]
+	  },
+	  wireAdd: {
+	    name: "meta.block.wire.nw",
+	    begin: wireAdd,
+	    beginCaptures: { 2: cap.mark, 3: cap.type, 5: cap.file, 7: cap.mark, 9: cap.mark },
+	    ...until,
+	    patterns: [{ include: "#mount" }, { include: "#listItem" }, { include: "#ref" }]
+	  },
+	  appendLine: {
+	    name: "meta.line.append.nw",
+	    begin: appendLine,
+	    beginCaptures: { 2: cap.mark, 3: cap.type, 5: cap.file, 7: cap.mark },
+	    end: `(;)(\\s*)$`,
+	    endCaptures: { 1: cap.mark },
+	    patterns: [{ include: "#ref" }]
+	  },
+	  listItem: {
+	    match: listItem,
+	    captures: { 2: cap.mark, 4: cap.file, 5: cap.mark }
 	  },
 	  mount: {
 	    match: mount,
@@ -397,6 +465,8 @@ v3 有五种头，五种模板。片段的作用不是省字，是**让作者每
 	    { include: "#namespace" },
 	    { include: "#chunk" },
 	    { include: "#wire" },
+	    { include: "#wireAdd" },
+	    { include: "#appendLine" },
 	    { include: "#ref" },
 	    { include: "#todo" },
 	    commentRule,
@@ -430,7 +500,7 @@ v2 的块名里带产物路径（`<<src/sort.c: merge>>=`），所以语言是"�
 
 所以这一层要两遍：
 
-1. **一遍找语言**：扫 `file<ext> … @` 区域，把里面出现的 `<< 名字 >>` 记成"名字 → ext"；
+1. **一遍找语言**：扫 `file<ext> … @` 与其追加写法 `file<ext> … += @` 的区域，把里面出现的 `<< 名字 >>` 记成"名字 → ext"；单行糖 `file<ext> x += << y >>;` 没有区域，就在那一行上直接记；
 2. **一遍切块体**：遇到 `<< 名字 >>= @`，用这个名字查表，查到了就请对应的语法来读；查不到（纯片段、或没接进任何文件）就不着色。
 
 一个块被接进两个不同后缀的文件时，以第一次出现的为准。这是有损的，但诚实：同一个块在不同语言里的着色本来就不可能同时对，选一个比乱猜好。
@@ -637,9 +707,16 @@ v2 的块名里带产物路径（`<<src/sort.c: merge>>=`），所以语言是"�
 	  for (let i = 0; i < lines.length; i += 1) {
 	    const r = own.tokenizeLine(lines[i], stack);
 	    stack = r.ruleStack;
-	    const opened = /^\s*file<([\w-]+)>\s+\S+\s*@\s*$/.exec(lines[i]);
+	    // `file<c> x @` 与它的追加写法 `file<c> x += @` 都是"从这里开始按 c 读"。
+	    const opened = /^\s*file<([\w-]+)>\s+\S+\s*(?:\+=)?\s*@\s*$/.exec(lines[i]);
 	    if (opened) {
 	      ext = opened[1];
+	      continue;
+	    }
+	    // 单行糖 `file<c> x += << y >>;`：没有体，语言就落在这一个名字上。
+	    const sugar = /^\s*file<([\w-]+)>\s+\S+\s*\+=\s*<<\s*([^<>]+?)\s*>>/.exec(lines[i]);
+	    if (sugar) {
+	      map.set(sugar[2], sugar[1]);
 	      continue;
 	    }
 	    if (has(r, TERM)) {

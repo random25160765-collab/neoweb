@@ -195,7 +195,7 @@ $$
 			if (!seen.insert(path).second)
 				throw Error(mt.file, mt.line, "物理路径冲突：" + path + " 挂载了不止一次");
 			auto it = doc.files.find(file_key(mt.name, mt.type));
-			if (it == doc.files.end() || !it->second.defined) continue;   // 还没写内容：不落盘
+			if (it == doc.files.end() || !it->second.touched) continue;   // 没写内容：不落盘
 			write_file(root + "/" + path, file_text(doc, it->second, line_mode));
 			++written;
 		}
@@ -206,8 +206,8 @@ $$
 	// 铺盘：从 top 开始，返回写了几个文件。
 	int tangle(const Document& doc, const string& outdir, bool line_mode) {
 		auto top = doc.dirs.find("top");
-		if (top == doc.dirs.end() || !top->second.defined)
-			throw Error(doc.main_file, 0, "缺少 dir top（tangle 的根）");
+		if (top == doc.dirs.end() || !top->second.declared)
+			throw Error(doc.main_file, 0, "缺少 dir top @（tangle 的根只能由 @ 建立）");
 		std::filesystem::create_directories(outdir);
 		set<string> seen;
 		int written = 0;
@@ -228,14 +228,15 @@ $$
 
 ## 七、不做什么
 
-v2 的 `tangle` 里有三件事，v3 一件都不做：
+v2 的 `tangle` 里有两件事，v3 一件都不做：
 
 | v2 有 | 为什么 v3 没有 |
 |---|---|
 | 按 `@after` / `@before` 排序 | 顺序就是接线顺序，没有第二种 |
-| 判 `defined`（占位不落盘） | 没有"只声明"，有定义才有名字 |
 | 判 `inside`（被别人引用过的不落盘） | 只有接线能落盘，chunk 永远不直接落盘 |
 
-这三样都是 v2 模型（chunk 带路径、子块嵌在别人体里）的产物。模型一换，它们连同代码一起消失——这一篇比 v2 少了大约一半行数，少掉的不是被优化掉的，是本来就不该在。
+这两样都是 v2 模型（chunk 带路径、子块嵌在别人体里）的产物。模型一换，它们连同代码一起消失——这一篇比 v2 少了大约一半行数，少掉的不是被优化掉的，是本来就不该在。
+
+还有一件 v2 做过、v3 也做，但换了名字：**判"占位不落盘"**。v2 叫 `defined`，v3 叫 `touched`——写过 `@` 或 `+=` 才算有内容。改名不是修辞：v3 里"名字由 `@` 建立"另有一个 `declared` 管重复，一个布尔不再够用，所以要两个。
 
 铺完盘之后还差一步：让人能用它。下一篇是入口。

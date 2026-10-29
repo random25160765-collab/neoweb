@@ -83,7 +83,7 @@ file<c> fragment @
 ## 六、核对
 
 ```
-nw tangle -o /tmp/ex book/skeleton.nw "book/Appendix B/fragment.nw"
+find book -name '*.nw' -print0 | xargs -0 nw tangle -o /tmp/ex
 cc -o /tmp/ex/fragment /tmp/ex/examples/fragment.c && /tmp/ex/fragment
 ```
 

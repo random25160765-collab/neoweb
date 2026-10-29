@@ -70,7 +70,7 @@ file<cpp> weave @
 
 那么 weave 需要什么？只需要知道**每一块吃到哪一行**。`line` 与 `end_line` 正好是这两个端点（第三篇里那两个字段就是为这里加的），于是渲染时重读源文件、跳过块区、其余行按原顺序攒成散文段，就够了。
 
-但"块"有三种，不止一种：`<< x >>= @` 是**一块实现**，`file ... @` 是**一次接线**，`dir ... @` 是一个目录的内容。三者都要按原文排进页面——尤其是接线，读者看接线就是在看这一页的顺序，绝不能糊成一段散文（`file<hpp> nw @` 里的 `<hpp>` 甚至会被浏览器当成标签）。
+但"块"有四种，不止一种：`<< x >>= @` 是**一块实现**，`file ... @` 是**一次接线**，`dir ... @` 是一个目录的内容，`book ... @` / `part ... @` 是书的清单。四种都要按原文排进页面——尤其是接线，读者看接线就是在看这一页的顺序，绝不能糊成一段散文（`file<hpp> nw @` 里的 `<hpp>` 甚至会被浏览器当成标签）。
 
 << 读原篇 >>= @
 	// 一篇源被切成一段一段：散文段、一块实现、或者一次接线。
@@ -80,12 +80,13 @@ file<cpp> weave @
 		size_t idx = 0;          // Chunk：chunks 里的下标
 		string key = "";         // Wire：file 的键，或 dir 的名字
 		bool is_dir = false;     // Wire：接的是目录还是文件
+		bool is_list = false;    // Wire：book/part 的清单体（照原文排，没有实例）
 		int first = 0;           // Prose / Wire：第一行在源里的行号（1 基）
 		vector<string> lines;    // Prose / Wire：原文行，连空行一起留着
 	};
 
 	// 按行读源：三种块挖出来，其余攒成散文段。
-	// 块的范围靠 line ~ end_line 卡住——解析器替 weave 记下的那两个端点。
+	// 块的范围靠解析器记下的端点卡住：chunk 是 line ~ end_line，其余对象是一串 span。
 	vector<Piece> read_source(const Document& doc, const string& src) {
 		vector<string> lines = split_lines(read_file(src));
 		int total = static_cast<int>(lines.size());
@@ -103,25 +104,51 @@ file<cpp> weave @
 			b.end = c.end_line > c.line ? c.end_line : c.line;
 			at[c.line] = b;
 		}
+		// 一个对象可能有几段（`+=` 每一次都开一段），所以走 spans 而不是一对行号。
+		// spans 缺了（没闭合的块）就退回 line/end_line：少丢一点，比整篇塌掉好。
+		auto splice = [&](const string& key, bool is_dir, bool is_list, int line, int end,
+		                  const vector<Span>& spans) {
+			if (line <= 0) return;
+			if (spans.empty()) {
+				if (end <= line) return;
+				Block b;
+				b.piece.kind = Piece::Wire;
+				b.piece.key = key;
+				b.piece.is_dir = is_dir;
+				b.piece.is_list = is_list;
+				b.end = end;
+				at[line] = b;
+				return;
+			}
+			for (const Span& sp : spans) {
+				if (sp.end <= sp.begin) continue;
+				Block b;
+				b.piece.kind = Piece::Wire;
+				b.piece.key = key;
+				b.piece.is_dir = is_dir;
+				b.piece.is_list = is_list;
+				b.end = sp.end;
+				at[sp.begin] = b;
+			}
+		};
 		for (const auto& kv : doc.files) {
 			const FileNode& f = kv.second;
-			if (f.src_file != src || f.line <= 0 || f.end_line <= f.line) continue;
-			Block b;
-			b.piece.kind = Piece::Wire;
-			b.piece.key = kv.first;
-			b.end = f.end_line;
-			at[f.line] = b;
+			if (f.src_file != src) continue;
+			splice(kv.first, false, false, f.line, f.end_line, f.spans);
 		}
 		for (const auto& kv : doc.dirs) {
 			const DirNode& d = kv.second;
-			if (d.src_file != src || d.line <= 0 || d.end_line <= d.line) continue;
-			Block b;
-			b.piece.kind = Piece::Wire;
-			b.piece.key = kv.first;
-			b.piece.is_dir = true;
-			b.end = d.end_line;
-			at[d.line] = b;
+			if (d.src_file != src) continue;
+			splice(kv.first, true, false, d.line, d.end_line, d.spans);
 		}
+		// 书与部也是接线的一种：它们的体是清单，既不是散文也不是实现。
+		// 不给 key——清单里没有实例可链，wire_html 照原文排就对了。
+		for (const auto& kv : doc.parts) {
+			const PartDef& p = kv.second;
+			if (p.src_file != src) continue;
+			splice(string(), false, true, p.line, 0, p.spans);
+		}
+		if (doc.book.src_file == src) splice(string(), false, true, doc.book.line, 0, doc.book.spans);
 
 		vector<Piece> out;
 		vector<string> prose;
@@ -161,6 +188,7 @@ file<cpp> weave @
 - **只收本篇的块**。同一个 `Document` 里有全书所有篇的块、所有 file 与 dir，按 `src_file` 滤一道，别人的东西不该在这里冒出来。
 - **结束行缺失时不跳**。`end_line` 为 0 说明那块没闭合——解析器本该报错，真走到这里就退化成"只丢块头那一行"，至少不把整篇吞掉。
 - **接线块连头带尾一起收**。`file<hpp> nw @` 与 `~@` 都要留在页面上：读者要看见"这个产物从哪一行开始接"。所以 Wire 那一股存的是整段原文，不是块体。
+- **`+=` 的每一段都要单独摆回原位**。一个对象在 `+=` 之后有好几处体，只记最后一对行号会把前面几段当成散文——那几段里有 `file<c> x;` 这类行，一旦按 markdown 渲染就露馅。所以文件、目录、部、书都记 `spans`，一段一个。
 
 ## 四、不自己写 Markdown
 

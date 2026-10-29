@@ -56,6 +56,8 @@ SRC := $(shell find book -name '*.nw' | sort | sed 's/ /\\ /g')
 
 这条边界必须守住，否则会滑成"两个实现各发展一半"：破点每多一个功能，`crosscheck` 能发现的偏差就少一处。
 
+它也认 `book` / `part` / `essay`：装配顺序由书定，两个实现都得按同一份先序铺盘。这一条不能只在一个实现里有——否则"产物一致"就只证明了文件内容相同，页的次序、篇的取舍全没被检验。
+
 ## 四、自举：两级判断，各答一个问题
 
 自举看起来是一件事，其实是两个不同的问题，分在两层答：
@@ -83,7 +85,7 @@ make crosscheck
 
 `crosscheck` 通过的那一刻叫**定点**：两个实现对同一份源给出同一棵树。定点不是永久状态，改一次语法就要重新打一次。
 
-**`check` 与 `test` 分工不同。** `make check` 读的是书：重复实现、未实现的引用、挂载冲突——错在源里。`make test` 读的是破点：二十七个小用例，喂给它的都是构造出来的 `.nw` 片段，不碰这本书。前者保证这一版的书自洽，后者保证换台机器时那个 Python 实现还认得出同一套语法。两条都不编译——编译是 `make`。
+**`check` 与 `test` 分工不同。** `make check` 读的是书：重复实现、未实现的引用、挂载冲突、书与部对不上——错在源里。`make test` 读的是破点：四十六个小用例，喂给它的都是构造出来的 `.nw` 片段，不碰这本书；每份片段另配一本书收它，所以顺序规则也在用例里。前者保证这一版的书自洽，后者保证换台机器时那个 Python 实现还认得出同一套语法。两条都不编译——编译是 `make`。
 
 ## 六、篇的路径里有空格
 
@@ -141,12 +143,12 @@ make crosscheck
 		python3 test_nw3.py
 
 	web: $(NW)
-		@$(NW) weave -b tangle/book.yaml -o weave $(SRC)
+		@$(NW) weave -o weave $(SRC)
 
 	# 第二个出口：markdown 版镜像书的目录，给离线评审、贴进 issue、拿去做别的东西。
 	# 它不跑增强（公式与图在 markdown 里就是原文），所以也不需要 vendor。
 	md: $(NW)
-		@$(NW) weave --markdown -b tangle/book.yaml -o weave-md $(SRC)
+		@$(NW) weave --markdown -o weave-md $(SRC)
 
 	# 端口被占是常态：上一轮的预览还开着，或者别的服务。所以先让开再起。
 	# `[n]w serve` 这个写法是为了不匹配到执行它的那个 shell 自己的命令行——

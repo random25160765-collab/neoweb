@@ -2,96 +2,85 @@
 
 一页 HTML 能看了，但它还不知道自己在书里排第几——没有前后章，没有左栏，读者只能一页一页翻文件。
 
-要知道位置，就得有**顺序**。顺序不能藏在命令行里：命令行是构建脚本的私事，读者不该为了知道章节次序去翻 Makefile；而且命令行给的顺序不留痕迹，下一次谁重跑一遍，顺序就可能不一样。
+要知道位置，就得有**顺序**。v2 把顺序放在一份 tangle 出来的 `book.yaml` 里：源里写一遍目录，`tangle` 抽一遍，`weave` 再读一遍。三处各有一份真相，改一处忘一处的经典开局——而且 `weave` 之前先得跑一次 `tangle`，只为了拿一份数据。
 
-所以顺序是一件**产物**：`book/menu.nw` 的正文里写着这份书的目录，`nw tangle` 把它抽成 `tangle/book.yaml`，`nw weave` 读它。目录是书的一篇，不是书旁边另放的一份数据。
+v3 把顺序放回源里：`book`、`part`、`essay` 都是语法。这带来一个连带的好处：**顺序就是装配顺序**，所以 `tangle` 也从同一份 `order` 里取篇的先后，不再由命令行拼。没被书收录的 `.nw` 进不了 `tangle`——本来就应该这样。
 
-## 一、目录长什么样
+## 一、清单已经在 AST 里了
 
-```yaml
-title: 文学编程
+合并多篇那一篇做过最难的一段：book 单例、part 递归展开、essay 与输入文件对上、`Document::order` 一次算定。所以这一篇要做的只有一件事——**把定义展开成渲染树**。
 
-parts:
-  - title: 序
-    files:
-      - book/skeleton.nw
-      - book/menu.nw
+两棵树，两个用途：
 
-  - title: 第 3 章 实现
-    files:
-      - book/Chapter 3/1-types.nw
-```
+- **定义树**（`BookDef` / `PartDef` / `Kid`）按名字索引，`kids` 记书写顺序，回答"源怎么说"；
+- **渲染树**（`Book` / `Part`）按层级嵌好，回答"页怎么看"。
 
-三个层级：书名、部、篇。层级是给人读的，解析只认**行首关键字 + 缩进**——所以这一小节不引 YAML 库：格式是我们自己定的那几种行，认得出、报得准，比"通用但错误信息一片空白"更值。
+为什么不省掉这一层、让渲染直接查定义树：每页都要问一次"我在哪、前后是谁、左栏怎么缩进"，而定义树是 map 加名字引用，每问一次都得记住一串 part 名。展开一次，之后所有问题都变成走一遍树。
 
-## 二、只认这几种行
+展开的规则只有一条，和 `merge` 里那次先序展开一模一样：**容器体按出现顺序走，part 展开时先展开它的孩子，散篇就插在它出现的位置**。两处规则相同不是巧合——它们是同一句话的两个消费者，`order` 是它们共同的结果。
 
-解析是一个四分支的状态机：`title:` 换书名，`- title:` 开一部，`files:` 进入篇清单，`- 路径` 加一篇。别的行一开始就该报错——目录写错时，人需要知道错在第几行，而不是得到一本空书。
+## 二、定义树到渲染树
 
-先定数据形状。`Part` 与 `Book` 在头文件里（第三篇就定好了），因为 `weave` 的接口要收它。
-
-还有一件事得提前交代：这一块的**落盘位置**与它的**讲述位置**不一样。`read_book` 是对外函数（`nw.hpp` 里有声明），必须排在匿名命名空间关掉之后，所以接线把它放在文件末尾。叙述顺序与落盘顺序在这里分了一次岔——这正是接线存在的理由：散文管理解，接线管顺序。
+`build_book` 是唯一入口。它不重新推导顺序，直接把 `doc.order` 抄过来：顺序只有一份，页序、装配序、上下章都从它来。
 
 << 目录 >>= @
 	}  // namespace
 
-	// 读目录：书名、部、篇。只认行首关键字与缩进，不引 YAML 库——
-	// 这几种行是我们自己定的，认得出、报得准，比"通用但错误信息空白"值。
-	Book read_book(const string& path) {
-		Book b;
-		b.file = path;   // 增强那一步靠它找 tangle/vendor
-		vector<string> lines = split_lines(read_file(path));
-		bool in_files = false;
-		for (size_t i = 0; i < lines.size(); ++i) {
-			const string& raw = lines[i];
-			string t = trim(raw);
-			if (t.empty() || t[0] == '#') continue;      // 空行与注释：目录里允许
-			int ws = leading_ws(raw);
-			if (ws == 0 && has_prefix(t, "title:")) {
-				b.title = trim(t.substr(6));
-				continue;
-			}
-			if (ws == 0 && t == "parts:") {
-				in_files = false;
-				continue;
-			}
-			if (has_prefix(t, "- title:")) {
-				Part p;
-				p.title = trim(t.substr(8));
-				b.parts.push_back(p);
-				in_files = false;
-				continue;
-			}
-			if (t == "files:") {
-				in_files = true;
-				continue;
-			}
-			if (has_prefix(t, "- ")) {
-				if (!in_files || b.parts.empty())
-					throw Error(path, static_cast<int>(i + 1), "这一行不知道挂在哪一部下面：" + t);
-				b.parts.back().files.push_back(trim(t.substr(2)));
-				continue;
-			}
-			throw Error(path, static_cast<int>(i + 1), "目录里认不出这一行：" + t);
+	namespace {
+
+	// 定义期的一部 → 渲染期的一部。kids 按书写顺序递归。
+	// open 记祖先链：环在 merge 里已经报过，这里不再报一次，只求别转死。
+	Part fill_part(const Document& doc, const string& key, set<string>& open) {
+		Part out;
+		auto it = doc.parts.find(key);
+		if (it == doc.parts.end() || !open.insert(key).second) {
+			out.title = key;   // 引用不到：名字照写，页面塌不了。报错是 merge 的事。
+			return out;
 		}
-		// 展平：阅读顺序。前后章按这个走，页面的次序也按这个走。
-		for (const Part& p : b.parts)
-			for (const string& f : p.files) b.order.push_back(f);
+		const PartDef& p = it->second;
+		out.title = p.title.empty() ? p.name : p.title;
+		for (const Kid& k : p.kids) {
+			if (k.is_part) {
+				out.kids.push_back(fill_part(doc, k.key, open));
+				continue;
+			}
+			out.files.push_back(k.key);
+		}
+		open.erase(key);
+		return out;
+	}
+
+	}  // namespace
+
+	// 定义树 → 渲染树。顺序直接复用 doc.order：先序展开只做一次。
+	Book build_book(const Document& doc) {
+		Book b;
+		b.title = doc.book.title.empty() ? doc.book.name : doc.book.title;
+		b.file = doc.book.src_file;
+		b.order = doc.order;
+		set<string> open;
+		for (const Kid& k : doc.book.kids) {
+			if (k.is_part) {
+				b.parts.push_back(fill_part(doc, k.key, open));
+				continue;
+			}
+			// 散篇：book 下直接收的一篇。它没有部名，单独成一层——
+			// 左栏里就是一串链接，不带分段标题。
+			Part loose;
+			loose.files.push_back(k.key);
+			b.parts.push_back(loose);
+		}
 		return b;
 	}
 ~@
 
-两处讲究。
-
-**`- title:` 必须排在 `- ` 之前判。** 两个都是"以减号开头"，顺序反了，每一部的名字都会被当成一个篇路径——而这条错误不会当场炸，要等到 `weave` 去读一个叫 `第 3 章 实现` 的文件时才炸，那时行号已经没了。
-
-**展平成 `order` 只做一次。** 前后章、左栏、目录页都要"下一篇是谁"，三处各自遍历 `parts` 会写出三份一样的循环，还容易有一处忘了跳空部。
+`fill_part` 挪进匿名命名空间，`build_book` 留在外面：前者是实现细节，后者在 `nw.hpp` 里有声明。这里先关一次匿名命名空间、再开一次，是因为这一块的**讲述位置**排在篇的身份之前，而 `slug` / `page_title` 还得留在匿名命名空间里——关早了它们就成了外部链接。
 
 ## 三、篇的身份：标题与文件名
 
 一页需要两样身份：**人看的标题**与**机器用的文件名**。
 
-标题不用另写。每篇的第一行就是 `# 数据模型` 这样的标题，作者已经写过一次了；再在目录里写一遍，就等于给同一件事造两份真相，改一处忘一处的经典开局。
+标题不用另写。每篇的第一行就是 `# 数据模型` 这样的标题，作者已经写过一次了；再在书里写一遍，就等于给同一件事造两份真相。`book` / `part` 上的 `name` 行与此不冲突：它给的是**部**的名字，不是篇的。
 
 << 篇的身份 >>= @
 	// 篇路径 → 文件名：取基名、去掉 .nw。同名会在 weave 里查出来报错。
@@ -103,7 +92,7 @@ parts:
 		return base;
 	}
 
-	// 一页的标题 = 它第一行 `# `。作者已经写过一次，不该在目录里再声明一遍。
+	// 一页的标题 = 它第一行 `# `。作者已经写过一次，不该在书里再声明一遍。
 	string page_title(const string& src) {
 		static map<string, string> cache;   // 一本几十页，左栏每页都要问一次，问一次就够了
 		auto hit = cache.find(src);
@@ -125,12 +114,13 @@ parts:
 
 ## 四、这一篇到哪为止
 
-目录能读了，身份也有了。还差最后一篇：谁来把这两样接上——左栏、前后章、目录页、写盘。
+书能建出来了，身份也有了。还差最后一篇：谁来把这两样接上——左栏、前后章、目录页、写盘。
 
 验收仍是编译（豁免照旧）：
 
 ```
+python3 nw3.py tangle -o /tmp/w5 book/skeleton.nw "book/Chapter 3"/*.nw book/Chapter\ 4/1-cli.nw book/Chapter\ 5/*.nw
 g++ -std=c++17 -Wall -Wextra -Wno-unused-function -I/tmp/w5 -c /tmp/w5/weave.cpp
 ```
 
-`read_book` 现在就能单独真跑，喂它一份本文开头的那个 YAML：三行一个部、两行一篇，读出来的 `order` 应当与缩进里看到的顺序一致。目录是数据的入口，这一处错了，后面每一页的"下一篇"都会错。
+`build_book` 现在就能单独真跑：把 `nw parse --ast` 印出来的 book 先序与页面顺序对一遍，两者必须一字不差。顺序是数据的入口，这一处错了，后面每一页的"下一篇"都会错。

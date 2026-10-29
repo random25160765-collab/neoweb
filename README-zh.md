@@ -42,8 +42,8 @@ make serve        # 本地预览，默认 http://127.0.0.1:8080
 |---|---|
 | `make` | tangle 全书 → 编译 `tangle/build/nw` |
 | `make check` | 只查源：重复实现、未实现的引用、挂载冲突、不可达的块 |
-| `make test` | 破点的用例（27 个语法与 tangle 用例） |
-| `make web` | 把每一篇渲成一页 HTML，按 `tangle/book.yaml` 排目录与上下章 |
+| `make test` | 破点的用例（46 个语法、书结构与 tangle 用例） |
+| `make web` | 把每一篇渲成一页 HTML，按源里的 `book` 结构排目录与上下章 |
 | `make md` | 同一份源出 Markdown 版（镜像书的目录），给离线评审与归档 |
 | `make serve` | 先让开端口，再起服务（换端口：`make serve PORT=8081`） |
 | `make crosscheck` | 用破点重铺一遍，与自举产物逐字节比对 |
@@ -64,7 +64,7 @@ make deps NPMFLAGS=--registry=https://registry.npmmirror.com
 book/            源：散文 + 语法 + 实现，全部由人写
 nw3.py           破点：只做 tangle 的 Python 实现，负责第一次
 Makefile         手写元层：找源、首次 bootstrap、转发
-tangle/          产物：源码、book.yaml、Makefile、examples/、editor/、build/nw
+tangle/          产物：源码、Makefile、examples/、editor/、build/nw
 weave/           产物：HTML（每篇一页 + index.html + tree.html）
 weave-md/        产物：Markdown，镜像书的目录
 docs/            设计笔记，不参与构建

@@ -288,7 +288,7 @@ KaTeX 只在构建时用一次：它的 JS 在 `tangle/vendor/`（`make deps` �
 	}
 ~@
 
-`vendor` 从 `book.yaml` 的位置推出来，不从"当前目录"推：`weave` 可以在任意目录被调用，而 `tangle/vendor` 与 `tangle/book.yaml` 的相对位置是固定的。
+`vendor` 是一条**构建约定**，不从书的路径推：KaTeX 由 `make deps` 放在 `tangle/vendor/katex`，而书在 `book/` 下——两者之间没有可推的关系。写死一条路径，比编一条假的推导链诚实；真要换个位置，改的是构建规则，那时这一行也得跟着改，这两处本来就该一起改。
 
 ## 六、这一篇往哪儿接
 

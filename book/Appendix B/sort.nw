@@ -284,7 +284,7 @@ file<c> sort @
 ## 八、这个例子说明了什么
 
 ```
-nw tangle -o /tmp/ex book/skeleton.nw "book/Appendix B/sort.nw"
+find book -name '*.nw' -print0 | xargs -0 nw tangle -o /tmp/ex
 cc -o /tmp/ex/sort /tmp/ex/examples/sort.c && /tmp/ex/sort
 ```
 

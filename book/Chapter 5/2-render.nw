@@ -56,7 +56,7 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 		map<string, string> paths = file_paths(doc);
 		map<size_t, vector<string>> out;
 		for (const auto& kv : doc.files) {
-			if (!kv.second.defined) continue;   // 挂载了没写内容：没有产物可指
+			if (!kv.second.touched) continue;   // 挂载了没写内容：没有产物可指
 			auto p = paths.find(kv.first);
 			string path = p == paths.end() ? kv.second.name : p->second;
 			set<size_t> seen;
@@ -247,7 +247,7 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 
 ## 四、接线不是散文
 
-页面上还有第三种东西：`file ... @` 与 `dir ... @`。它们是**接线**，既不是散文也不是实现。若按散文渲染，`file<hpp> nw @` 里的 `<hpp>` 会被浏览器当成一个 HTML 标签，页面上只剩半行字——这是"漏认"的代价，比错认更隐蔽。
+页面上还有第三种东西：`file ... @`、`dir ... @`，以及 `book ... @` / `part ... @`。它们是**接线**，既不是散文也不是实现。若按散文渲染，`file<hpp> nw @` 里的 `<hpp>` 会被浏览器当成一个 HTML 标签，页面上只剩半行字——这是"漏认"的代价，比错认更隐蔽。
 
 所以接线要单独排：照原文一行一行出，**实例行变成链接**。读者读接线，读到的其实就是这一页的顺序——链接可点，等于给这一页配了一份目录。
 
@@ -256,7 +256,7 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 	// 一行可能有多个实例（用 | 连写），按出现顺序与 Inst 一一对应。
 	string wire_html(const Document& doc, const Ctx& ctx, const Piece& p) {
 		map<int, vector<const Inst*>> inst_at;   // 行号 → 这一行上的实例
-		if (!p.is_dir) {
+		if (!p.is_dir && !p.is_list) {
 			auto it = doc.files.find(p.key);
 			if (it != doc.files.end())
 				for (const Inst& in : it->second.body) inst_at[in.line].push_back(&in);
@@ -289,7 +289,7 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 	}
 ~@
 
-`dir` 体里只有挂载（`dir x;`、`file<c> y;`），没有实例，所以整个块照抄——`inst_at` 对它为空，循环自然走"原样输出"那一条。**不为目录写第二个函数**：一处多态靠数据空着来表达，比两个只差一个分支的函数更好读。
+`dir`、`book`、`part` 的体里只有挂载与清单项（`dir x;`、`file<c> y;`、`part p;`、`essay e;`），没有实例，所以整个块照抄——`inst_at` 对它们为空，循环自然走"原样输出"那一条。**不为它们各写一个函数**：一处多态靠数据空着来表达，比四个只差一个分支的函数更好读。
 
 ## 五、样式
 
@@ -317,6 +317,7 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 	nav.side a.title { display:block; font-weight:700; font-size:.95rem; margin-bottom:1.4rem; color:var(--fg); }
 	nav.side .part { margin:1.5rem 0 .4rem; color:var(--dim); font-size:.72rem; letter-spacing:.06em; }
 	nav.side .part.here { color:var(--accent); }
+	nav.side .sub { padding-left:.75rem; }
 	nav.side a { display:block; padding:.2rem .55rem; margin-left:-.55rem; border-radius:var(--radius); color:var(--fg); }
 	nav.side a:hover { background:var(--code); text-decoration:none; }
 	nav.side a.here { color:var(--accent); font-weight:600; background:var(--accent-soft); }

@@ -131,7 +131,7 @@ Flash Attention 的办法是把 N 切成块，块内做完 softmax 再乘 V，�
 ## 六、核对
 
 ```
-nw tangle -o /tmp/ex book/skeleton.nw "book/Appendix B/triton-attention.nw"
+find book -name '*.nw' -print0 | xargs -0 nw tangle -o /tmp/ex
 python3 -m py_compile /tmp/ex/examples/attention.py
 ```
 

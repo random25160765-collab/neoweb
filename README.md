@@ -42,8 +42,8 @@ make serve        # preview at http://127.0.0.1:8080
 |---|---|
 | `make` | tangle the book, then compile `tangle/build/nw` |
 | `make check` | source checks only: duplicate definitions, unresolvable references, mount conflicts, unreachable chunks |
-| `make test` | the Python port's test suite (27 syntax and tangle cases) |
-| `make web` | render one HTML page per chapter, ordered by `tangle/book.yaml` |
+| `make test` | the Python port's test suite (46 syntax, book and tangle cases) |
+| `make web` | render one HTML page per chapter, ordered by the `book` structure in the source |
 | `make md` | export the same source as Markdown, mirroring the book's directory layout |
 | `make serve` | kill any running preview, then serve `weave/` (another port: `make serve PORT=8081`) |
 | `make crosscheck` | re-expand with the Python port and diff byte-for-byte against the self-hosted output |
@@ -64,7 +64,7 @@ make deps NPMFLAGS=--registry=https://registry.npmmirror.com
 book/            source: prose, grammar and implementation, all hand-written
 nw3.py           bootstrap: a tangle-only Python port, used for the first run
 Makefile         hand-written meta layer: find sources, bootstrap once, forward
-tangle/          products: sources, book.yaml, Makefile, examples/, editor/, build/nw
+tangle/          products: sources, Makefile, examples/, editor/, build/nw
 weave/           products: HTML (one page per chapter + index.html + tree.html)
 weave-md/        products: Markdown, mirroring the book's directory layout
 docs/            design notes, not part of the build

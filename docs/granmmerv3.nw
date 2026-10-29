@@ -168,3 +168,68 @@ chunk namespace tree与code tree两套图的可视化与导航
 由于语法全部变了，ide插件要更新，weave后端要更新，全部都要更新。
 
 ---
+
+我再补一个新的语法：分片接线（或者叫追加接线）
+
+假如说我已经定义了
+
+dir top @
+	dir a;
+~@
+
+我要在top文件夹加一个文件夹/文件只需要：
+
+dir top += @
+	dir b;
+	file<c> xxx;
+~@
+
+或者也可以（语法糖，仅限追加单个文件/文件夹） 
+
+dir top += dir b;
+
+同样，文件的chunk也可以这样：
+
+file<c> x += << chunk >>
+
+file<c> x += @
+	<< chunk_1 >> | << chunk_2 >>
+~@
+
+一些规矩：允许纯 +=，第一次也是追加，不必先有 @；追加的挂载仍受唯一性约束：同名同类型只能挂一处，冲突报错。；+= 到不存在的对象 → 报错；@ 只能一次（定义），+= 任意次。
+
+然后要怎么确定追加顺序呢？我们把book.yaml做成保留数据结构，而不是一个tangle出来的yaml文件（command同理，这样weave之前不需要先tangle，更简洁）每本书都要有，并且和实际repo能对上。我们的拓扑序就按照这个目录来。每本书都要写一个这样的数据结构，没有的话报错。
+
+（你要怎么设计？）
+
+关于nw parse：nw parse --ast 输出最终装配清单（也就是被tangle消费的东西）
+
+规矩：不向后兼容，默认做破坏性重构。
+
+关于book.yaml数据结构的语法设计：统一的描述式语法
+
+book是类型，neoweb是本书书名。book只能被定义一次，全项目只能有一个 book 定义，重复即错
+book neoweb @
+	part zzz;
+	essay xxx;
+~@
+
+所有的essay都要能在目录里找到。book 下的 essay 是什么？无类的散篇。
+
+然后它也可以追加：
+
+book neoweb += essay yyy;（追加一个叫yyy的散篇）
+part zzz += @
+	essay a;
+	essay b;
+~@
+
+part层级
+
+part zzz += part sss;
+part sss += part ddd;
+part ddd += essay fff;
+
+新增保留词：book，part，essay
+
+book 同时定阅读顺序与装配顺序 ⇒ 没被 book 收录的 .nw 进不了 tangle——本来就应该这样。

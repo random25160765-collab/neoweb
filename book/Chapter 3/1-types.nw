@@ -10,7 +10,7 @@ v3 只剩五样，另加一样 v2 没有的：**结束行号**。少掉的不是
 |---|---|
 | `path` | 位置由 `file` 的接线决定，chunk 不知道自己属于哪个产物 |
 | `after` / `before` | 顺序就是接线顺序，没有第二种排序 |
-| `defined` | 没有"只声明"这个状态，有定义才有名字 |
+| `defined` | 一个布尔不够：v3 要分开"名字由 `@` 建立"与"内容写过" |
 | `inside` | 没有子块，定义永远在文档层 |
 
 添上的那一样归 weave：它要按原文顺序把散文与块交错排出来，就得知道每一块吃到哪一行。**`~@` 对综合只是"体到此为止"，对展开才是"这里回到散文"**——同一个标记，两种读者各取一面。
@@ -113,6 +113,13 @@ v2 靠字符串前缀（`\x01`、`\x02`）在文本里打标记，展开时再�
 		string file;      // 写在哪个 .nw 里
 	};
 
+	// 一个分片在源里的范围。加分片之后，一个对象在同一篇里可能有好几段，
+	// weave 要把它们各自摆回散文之间，光靠 line/end_line 一对数字不够。
+	struct Span {
+		int begin = 0;
+		int end = 0;
+	};
+
 	// 一个文件：产物内容 = 实例列表依次展开。
 	struct FileNode {
 		string name;
@@ -120,8 +127,10 @@ v2 靠字符串前缀（`\x01`、`\x02`）在文本里打标记，展开时再�
 		vector<Inst> body;
 		string src_file;  // 写在哪个 .nw 里
 		int line = 0;
-		int end_line = 0; // ~@ 所在行号
-		bool defined = false;
+		int end_line = 0; // 最后一个 ~@ 的行号
+		bool declared = false;   // 有过 file X @：只能一次
+		bool touched = false;    // 有过 @ 或 +=：决定是否落盘
+		vector<Span> spans;      // 每个接线体的起止：weave 按它切原文
 	};
 
 	// 一个目录：只装挂载，没有内容。
@@ -131,30 +140,68 @@ v2 靠字符串前缀（`\x01`、`\x02`）在文本里打标记，展开时再�
 		string src_file;
 		int line = 0;
 		int end_line = 0;
-		bool defined = false;
+		bool declared = false;
+		bool touched = false;
+		vector<Span> spans;
 	};
 
-	// 书的目录：来自 book.yaml（menu.nw 的产物）。顺序就是阅读顺序。
+	// 清单树的一项：一个子部，或一篇 essay。顺序就是孩子们的出现顺序。
+	struct Kid {
+		bool is_part = false;
+		string key;         // 部名，或 essay 的仓库根相对路径
+		string src_file;
+		int line = 0;
+	};
+
+	// 定义期的部：书里的一级或多级分组。kids 按书写顺序排，先序展开就是阅读序。
+	struct PartDef {
+		string name;             // 标识符：引用与追加都靠它
+		string title;            // 可选的 name 行；空则用标识符
+		bool declared = false;   // 有过 part X @
+		bool touched = false;    // 有过 @ 或 +=
+		vector<Kid> kids;
+		string src_file;
+		int line = 0;
+		vector<Span> spans;      // 每个体一段：+= 之后一个部可能有好几段
+	};
+
+	// 定义期的书：全项目只有一个。它不落盘、不挂载，只描述顺序。
+	struct BookDef {
+		string name;             // 标识符即书名
+		string title;            // 可选的 name 行；空则用标识符
+		bool declared = false;
+		bool touched = false;
+		vector<Kid> kids;
+		string src_file;
+		int line = 0;
+		vector<Span> spans;
+	};
+
+	// 渲染期的部：只留标题与篇，供左栏、目录页、上下章用。
 	struct Part {
 		string title;
 		vector<string> files;
+		vector<Part> kids;       // 子部：左栏与目录页按层缩进
 	};
 
 	struct Book {
 		string title;
 		vector<Part> parts;
-		vector<string> order;   // 展平：阅读顺序上的篇路径
-		string file;            // 目录来自哪个文件：vendor 之类的东西跟着它定位
+		vector<string> order;    // 先序展开的篇路径：页序、装配序共用
+		string file;             // book 定义写在哪：vendor 跟着它定位
 	};
 
-	// 整份文档：一张表 + 一棵树。
-	// 表：全名 → 下标。树：dir 的挂载，file 的接线。
+	// 整份文档：一张表 + 两棵树。
+	// 表：全名 → 下标；物理树：dir 的挂载、file 的接线；清单树：book/part/essay。
 	struct Document {
 		vector<Chunk> chunks;
 		map<string, size_t> index;
 		map<string, DirNode> dirs;
 		map<string, FileNode> files;
 		set<string> namespaces;   // 声明过的命名空间全名
+		map<string, PartDef> parts;
+		BookDef book;
+		vector<string> order;     // essay 先序：页序与装配序的唯一来源
 		string main_file;         // 报错用的主源文件名
 	};
 
@@ -211,6 +258,8 @@ v2 靠字符串前缀（`\x01`、`\x02`）在文本里打标记，展开时再�
 	// ---- 解析（parse.cpp）----
 	Document parse(const string& src, const string& file);
 	Document merge(vector<Document> docs);
+	// 装配清单：parse --ast 的出口。JSON 是给机器与插件的，人读摘要由命令行自己拼。
+	string ast_json(const Document& doc);
 
 	// ---- 综合（tangle.cpp）----
 	// 带 file/at_line：解析失败时要指回"写错的那一行"，而名字本身不知道自己写在哪。
@@ -220,8 +269,8 @@ v2 靠字符串前缀（`\x01`、`\x02`）在文本里打标记，展开时再�
 	int tangle(const Document& doc, const string& outdir, bool line_mode);
 
 	// ---- 展开（weave.cpp）----
-	// 目录先读进来：展开要用它算前后章与左栏，不必自己再猜一遍顺序。
-	Book read_book(const string& path);
+	// 清单树从 AST 里长出来：顺序只有一份，weave 不再读第二份文件。
+	Book build_book(const Document& doc);
 	// 一页 = 一份源。doc 里有全部篇的块，这里只取 src 那一篇。
 	string page_html(const Document& doc, const Book& book, const string& src);
 	int weave(const Document& doc, const Book& book, const string& outdir);

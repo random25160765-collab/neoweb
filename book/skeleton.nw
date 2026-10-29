@@ -12,7 +12,6 @@ dir top @
 	file<cpp> weave;
 	file<cpp> main;
 	file<cpp> serve;
-	file<yaml> book;
 	file Makefile;
 	dir examples;
 	dir editor;
@@ -22,7 +21,7 @@ dir top @
 
 现在这条界线只有一句：**生成的都在 `tangle/` 下，仓库根只放手写的**。`book/`、`nw3.py`、根 `Makefile`、README、LICENSE、`docs/`、`.github/`、`assets/` 是人写的；`tangle/` 与 `weave/` 是铺出来的。
 
-`top` 下的这棵树是"工具 + 例子 + 插件"的全部：八个文件——模型（`nw.hpp`）、工具（util）、三个阶段（parse、tangle、weave）、站点（serve）、入口（main），以及一份数据（`book.yaml`）；再加一份构建规则（`Makefile`）。
+`top` 下的这棵树是"工具 + 例子 + 插件"的全部：七个文件——模型（`nw.hpp`）、工具（util）、三个阶段（parse、tangle、weave）、站点（serve）、入口（main）；再加一份构建规则（`Makefile`）。这里**没有**书的目录：那已经不是产物了，它就在源里（`book/menu.nw`）。
 
 注意这里只有**挂载**（`file ...;`），没有内容。内容在别的篇里用 `file ... @` 定义，两边靠名字对上。挂载与定义分开，是 v3 与 v2 最大的不同之一：文件出现在哪个目录，和它的内容写在哪一篇，是两件事。
 

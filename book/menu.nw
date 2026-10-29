@@ -6,90 +6,112 @@ v3 换了模型：不再把 chunk 想成"C 的声明"，而把它想成**可综�
 
 ## 章次
 
-目录不是另一份文件，就是下面这一段：它既是这一页的正文，也是机器读的数据。`nw tangle` 把它抽成 `tangle/book.yaml`，weave 据此排页。
+目录不是另一份文件，也不是一份产物：它就是下面这几个 `book` / `part` 块。`parse` 把它们读进 AST，`tangle` 照它的次序铺盘，`weave` 照它的次序排页——**顺序只有一份**，不再有"页序一套、装配序另一套"。
 
-file<yaml> book @
-	<< 目录表 >>
+`book` 全项目只能有一个，标识符就是书名；`name` 行是给人看的标题。没被这本书收录的 `.nw` 进不了 tangle——书没收它，它就不属于这本书。
+
+book neoweb @
+	name Neoweb;
+	part preface;
+	part ch1;
+	part ch2;
+	part ch3;
+	part ch4;
+	part ch5;
+	part ch6;
+	part appA;
+	part appB;
+	part appC;
+	part appD;
 ~@
 
-## 目录表
+## 部
 
-清单写成 chunk：人读它的样子，机器读它的行。
+部可以嵌套：`part` 的体里既能写 `essay`，也能写 `part`。这本书只有一层，够用；再深的层级是给别的书准备的。
 
-<< 目录表 >>= @
-	title: Neoweb
-	parts:
-	  - title: 序
-	    files:
-	      - book/menu.nw
-	      - book/skeleton.nw
+`essay` 收的是一篇 `.nw` 的路径，写法和命令行上给的一致。同一篇只能被收一次——收两次不是"读两遍"，是这本书自己说不清那一篇排在哪。
 
-	  - title: 第 1 章 为什么是文学编程
-	    files:
-	      - book/Chapter 1/1-history.nw
-	      - book/Chapter 1/2-crisis.nw
-	      - book/Chapter 1/3-attempt.nw
-	      - book/Chapter 1/4-decisions.nw
-	      - book/Chapter 1/5-why.nw
-	      - book/Chapter 1/6-outlook.nw
+part preface @
+	name 序;
+	essay book/menu.nw;
+	essay book/skeleton.nw;
+~@
 
-	  - title: 第 2 章 语法
-	    files:
-	      - book/Chapter 2/1-syntax.nw
+part ch1 @
+	name 第 1 章 为什么是文学编程;
+	essay book/Chapter 1/1-history.nw;
+	essay book/Chapter 1/2-crisis.nw;
+	essay book/Chapter 1/3-attempt.nw;
+	essay book/Chapter 1/4-decisions.nw;
+	essay book/Chapter 1/5-why.nw;
+	essay book/Chapter 1/6-outlook.nw;
+~@
 
-	  - title: 第 3 章 实现
-	    files:
-	      - book/Chapter 3/1-types.nw
-	      - book/Chapter 3/2-util.nw
-	      - book/Chapter 3/3-parse.nw
-	      - book/Chapter 3/4-tangle.nw
+part ch2 @
+	name 第 2 章 语法;
+	essay book/Chapter 2/1-syntax.nw;
+~@
 
-	  - title: 第 4 章 入口
-	    files:
-	      - book/Chapter 4/1-cli.nw
-	      - book/Chapter 4/2-serve.nw
+part ch3 @
+	name 第 3 章 实现;
+	essay book/Chapter 3/1-types.nw;
+	essay book/Chapter 3/2-util.nw;
+	essay book/Chapter 3/3-parse.nw;
+	essay book/Chapter 3/4-tangle.nw;
+~@
 
-	  - title: 第 5 章 展开
-	    files:
-	      - book/Chapter 5/1-markdown.nw
-	      - book/Chapter 5/2-render.nw
-	      - book/Chapter 5/3-book.nw
-	      - book/Chapter 5/4-site.nw
-	      - book/Chapter 5/5-enhance.nw
-	      - book/Chapter 5/6-md.nw
+part ch4 @
+	name 第 4 章 入口;
+	essay book/Chapter 4/1-cli.nw;
+	essay book/Chapter 4/2-serve.nw;
+~@
 
-	  - title: 第 6 章 协作
-	    files:
-	      - book/Chapter 6/1-collab.nw
-	      - book/Chapter 6/2-init.nw
-	      - book/Chapter 6/3-skills.nw
+part ch5 @
+	name 第 5 章 展开;
+	essay book/Chapter 5/1-markdown.nw;
+	essay book/Chapter 5/2-render.nw;
+	essay book/Chapter 5/3-book.nw;
+	essay book/Chapter 5/4-site.nw;
+	essay book/Chapter 5/5-enhance.nw;
+	essay book/Chapter 5/6-md.nw;
+~@
 
-	  - title: 附录 A 构建
-	    files:
-	      - book/Appendix A/1-construct.nw
-	      - book/Appendix A/2-tools.nw
+part ch6 @
+	name 第 6 章 协作;
+	essay book/Chapter 6/1-collab.nw;
+	essay book/Chapter 6/2-init.nw;
+	essay book/Chapter 6/3-skills.nw;
+~@
 
-	  - title: 附录 B 示例
-	    files:
-	      - book/Appendix B/hello.nw
-	      - book/Appendix B/fragment.nw
-	      - book/Appendix B/multi-file.nw
-	      - book/Appendix B/sort.nw
-	      - book/Appendix B/chardev-ioctl.nw
-	      - book/Appendix B/cutlass-gemm.nw
-	      - book/Appendix B/triton-attention.nw
+part appA @
+	name 附录 A 构建;
+	essay book/Appendix A/1-construct.nw;
+	essay book/Appendix A/2-tools.nw;
+~@
 
-	  - title: 附录 C 编辑器
-	    files:
-	      - book/Appendix C/1-editor.nw
+part appB @
+	name 附录 B 示例;
+	essay book/Appendix B/hello.nw;
+	essay book/Appendix B/fragment.nw;
+	essay book/Appendix B/multi-file.nw;
+	essay book/Appendix B/sort.nw;
+	essay book/Appendix B/chardev-ioctl.nw;
+	essay book/Appendix B/cutlass-gemm.nw;
+	essay book/Appendix B/triton-attention.nw;
+~@
 
-	  - title: 附录 D 参考
-	    files:
-	      - book/Appendix D/references.nw
+part appC @
+	name 附录 C 编辑器;
+	essay book/Appendix C/1-editor.nw;
+~@
+
+part appD @
+	name 附录 D 参考;
+	essay book/Appendix D/references.nw;
 ~@
 
 ## 为什么先有骨架
 
 v2 的目录是 tangle 出来的、书的顺序是散文顺序、实现的顺序藏在顶块里——三套顺序各管一段，读者走一遍要拼三次。
 
-v3 只有两套：**书是阅读顺序**（这一页），**repo 是接线顺序**（骨架篇与各 `file ... @` 的实例列表）。两者都是显式的，谁也不猜谁。
+v3 只有两套：**书是阅读顺序**（这一页），**repo 是接线顺序**（骨架篇与各 `file ... @` 的实例列表）。两者都是显式的，谁也不猜谁；而装配顺序与阅读顺序是同一份 `order`——同一棵树上的两次消费者，不是两份数据。

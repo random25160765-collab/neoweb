@@ -4,7 +4,7 @@
 
 命令行只做三件事：**认参数**、**分派**、**决定退出码**。它不解析 `.nw`、不展开、不写盘——那些都在别的篇里。它负责的是另一件事：人敲下去之后，工具不能沉默。
 
-三条命令：`tangle` 给编译器，`weave` 给读者，`serve` 把后者的产物摆到浏览器里。三者共享同一份源，出口不同。这一篇把三条都接上。
+四条命令：`tangle` 给编译器，`weave` 给读者，`parse` 给工具（插件与脚本看装配清单），`serve` 把 `weave` 的产物摆到浏览器里。前三条共享同一份源，出口不同。这一篇把四条都接上。
 
 ## 一、接线
 
@@ -34,27 +34,30 @@ file<cpp> main @
 
 不写"更多信息见别处"。用法串把人推去另一个地方找答案，等于承认它自己说不清。
 
-三条命令的用法写在同一个串里，不按命令分片输出：读者敲错时想看到的是全貌，而不是"你敲的这一条怎么用"。开关各归各行，读的人自己挑。
+四条命令的用法写在同一个串里，不按命令分片输出：读者敲错时想看到的是全貌，而不是"你敲的这一条怎么用"。开关各归各行，读的人自己挑。
 
 << 用法 >>= @
 	// 用法串只回答两个问题：命令长什么样、每个开关改变什么。
 	const char* usage() {
 		return "用法：\n"
 		       "  nw tangle [-o 目录] [-d|--debug] 篇...\n"
-		       "  nw weave  [-o 目录] [-b 目录文件] [-m|--markdown] 篇...\n"
+		       "  nw weave  [-o 目录] [-m|--markdown] 篇...\n"
+		       "  nw parse  [--ast] 篇...\n"
 		       "  nw serve  [-p 端口] [目录]\n"
 		       "\n"
 		       "  -o 目录      产物写到哪里（默认当前目录）\n"
 		       "  -d, --debug  产物里插 #line，让编译错误指回 .nw\n"
-		       "  -b 文件      书的目录，由 menu 篇展开而来（默认 tangle/book.yaml）\n"
 		       "  -m, --markdown  weave 出 markdown（镜像书的目录），默认出 HTML\n"
+		       "  --ast        parse 输出装配清单（JSON），默认只报一行摘要\n"
 		       "  -p 端口      服务端口（默认 8080）\n";
 	}
 ~@
 
 `--debug` 这一行的意思是"多写一些只有调试时才想要的标记"，具体是什么在综合那一篇：断了才插的 `#line`。用法串不解释机制，只交代开关的后果。
 
-`-b` 与 `-o` 是一对，但方向相反：`-o` 说产物去哪，`-b` 说输入从哪来。`weave` 既写页又读目录，两个都得有，所以它在三条命令里是参数最多的那条——这是它真正的形状，不该靠默认值藏起来。
+v3 的 `weave` 不再有 `-b`：书的目录是源里的 `book` 结构，跟着 AST 一起进来。少一个开关不是省事，是少一条**必须同步的旁路**——v2 里 `-b` 指的那份 `book.yaml` 是 tangle 的产物，所以 `weave` 之前必须先生成它一次；两处各存一份顺序，改一处忘一处，页序与装配序就会不一致。
+
+`parse` 是新增的一条：它只读源、并表、把结果交出去。`--ast` 给机器（JSON），不带开关时给人一行摘要。有了它，插件的语法树、构建脚本的依赖表、以及"这本书到底收了哪几篇"这种问题，都不必先跑一遍 `tangle` 再回头看磁盘。
 
 ## 四、参数：手写一遍就够
 
@@ -62,8 +65,8 @@ file<cpp> main @
 
 规则四条：
 
-- `-o`、`-b`、`-p` 各吃掉下一个词；
-- `-d` / `--debug` 是开关；
+- `-o`、`-p` 各吃掉下一个词；
+- `-d` / `--debug`、`-m` / `--markdown`、`--ast` 是开关；
 - 其余以 `-` 开头的**报错**，不当文件。把 `-x` 当文件名读，报错会变成"打不开文件 -x"，把错怪到文件系统头上；
 - 其余都是输入（篇路径，或 `serve` 的目录）。
 
@@ -71,10 +74,10 @@ file<cpp> main @
 	struct Options {
 		string command;
 		string outdir = ".";
-		string book = "tangle/book.yaml";
 		int port = 8080;
 		bool debug = false;
 		bool markdown = false;   // weave 的出口：默认 HTML，-m 换 markdown
+		bool ast = false;        // parse 的出口：默认一行摘要，--ast 出 JSON
 		vector<string> files;
 	};
 
@@ -82,7 +85,7 @@ file<cpp> main @
 		return cmd == "-h" || cmd == "--help" || cmd == "help";
 	}
 
-	// 手写解析：四个开关、三个取值，撑不起一个 getopt 依赖。
+	// 手写解析：五个开关、两个取值，撑不起一个 getopt 依赖。
 	Options read_args(int argc, char** argv) {
 		if (argc < 2) throw Error("nw", 0, "缺少子命令");
 		Options o;
@@ -93,9 +96,6 @@ file<cpp> main @
 			if (a == "-o" || a == "--out") {
 				if (i + 1 >= argc) throw Error("nw", 0, "-o 后面要跟一个目录");
 				o.outdir = argv[++i];
-			} else if (a == "-b" || a == "--book") {
-				if (i + 1 >= argc) throw Error("nw", 0, "-b 后面要跟一个文件");
-				o.book = argv[++i];
 			} else if (a == "-p" || a == "--port") {
 				if (i + 1 >= argc) throw Error("nw", 0, "-p 后面要跟一个端口");
 				string v = argv[++i];
@@ -111,6 +111,8 @@ file<cpp> main @
 				o.debug = true;
 			} else if (a == "-m" || a == "--markdown") {
 				o.markdown = true;
+			} else if (a == "--ast") {
+				o.ast = true;
 			} else if (!a.empty() && a[0] == '-') {
 				throw Error("nw", 0, "不认识的开关：" + a);
 			} else {
@@ -123,18 +125,19 @@ file<cpp> main @
 
 端口在这里就地校验，不留给 `bind`：`-p 大` 交给系统调用，报出来的是 `getaddrinfo` 与 `errno` 的英文，读者得先知道 `EAI_SERVICE` 是什么才能改对那一行。三个数字字符就能问清的事，不该拖到三十行之后。
 
-参数层只负责拆词，**不判断哪条命令需要什么**。"必须有输入文件"是 `tangle` 的要求，就由 `tangle` 自己说——放在这里，`nw 打错字` 会先报"没有输入文件"，把真正的问题盖掉。
+参数层只负责拆词，**不判断哪条命令需要什么**。"必须有输入文件"是 `tangle` 的要求，就由 `tangle` 自己说——放在这里，`nw 打错字` 会先报"没有输入文件"，把真正的问题盖掉。同理，`--ast` 只有 `parse` 认，别的命令收到它也不报错：开关是全命令共用的一张小表，谁用谁取。
 
 报错里的文件名写的是 `nw`，不是空串：`where()` 拼出来就是 `nw: 缺少子命令`，与系统里任何一条命令同一个口吻。空串会拼出一个以冒号开头的怪句子，读者第一眼看到的是标点。
 
-## 五、分派：三条命令，三个退出码
+## 五、分派：四条命令，三个退出码
 
-三条命令的分派都只有四步：读全部篇、并成一份文档、调对应的阶段、报一句数量。`tangle` 与 `weave` 前两步完全一样——同一份源，两个出口。
+四条命令的分派都只有四步：读全部篇、并成一份文档、调对应的阶段、报一句数量。`tangle`、`weave`、`parse` 前两步完全一样——同一份源，三个出口。
 
-**传进来的顺序就是并表的顺序**，所以篇的先后由调用方决定，不写死在书里。写死在书里的顺序，第二次调整就没人记得它藏哪了；而调用方那边是构建脚本，顺序本来就摆在那儿。
+**并表的顺序不归命令行管**：命令行只给"有哪些篇"，顺序由书里的 `book` 结构定。这一点与 v2 相反——v2 说"传进来的顺序就是并表的顺序"，于是篇的先后藏在构建脚本里，第二次调整就没人记得它藏哪了。v3 把它放回源：构建脚本给的是一堆文件，书给的是次序，两者分工明确。
 
 << 分派 >>= @
 	// 三条命令共用前两步：读全部篇、并成一份文档。
+	// 顺序不在这里决定：merge 只认 book 的先序，命令行给的是"有哪些篇"。
 	Document load(const Options& o) {
 		vector<Document> docs;
 		for (const auto& path : o.files) docs.push_back(parse(read_file(path), path));
@@ -149,12 +152,25 @@ file<cpp> main @
 		return 0;
 	}
 
-	// weave 多读一样东西：书的目录。它不进 Document——那是源里的结构，
-	// 目录是另一份产物（menu 篇展开出来的 book.yaml）。
+	// 装配清单：机器读 JSON，人读一行摘要。两者都从同一份 AST 来，不另算一遍。
+	int cmd_parse(const Options& o) {
+		if (o.files.empty()) throw Error("nw", 0, "parse 没有输入文件");
+		Document doc = load(o);
+		if (o.ast) {
+			std::cout << ast_json(doc);
+			return 0;
+		}
+		std::cout << "书：" << (doc.book.title.empty() ? doc.book.name : doc.book.title) << "，收录 "
+		          << doc.order.size() << " 篇（输入 " << o.files.size() << " 篇）\n";
+		return 0;
+	}
+
+	// weave 不再读第二份文件：书的目录是 AST 的一部分（源里的 book 结构），
+	// 这里只把定义树展开成渲染树。
 	int cmd_weave(const Options& o) {
 		if (o.files.empty()) throw Error("nw", 0, "weave 没有输入文件");
 		Document doc = load(o);
-		Book book = read_book(o.book);
+		Book book = build_book(doc);
 		int n = o.markdown ? weave_md(doc, book, o.outdir) : weave(doc, book, o.outdir);
 		std::cout << "写出 " << n << " 页\n";
 		return 0;
@@ -182,7 +198,7 @@ file<cpp> main @
 | 码 | 含义 | 谁该改 |
 |---|---|---|
 | 0 | 成功 | —— |
-| 1 | 源写错了（`parse` / `merge` / `tangle` 抛的） | 改 `.nw` |
+| 1 | 源写错了（`parse` / `merge` / `tangle` / `weave` 抛的） | 改 `.nw` |
 | 2 | 敲错了（子命令、开关、用法） | 改调用的那一行 |
 
 分开的理由是**构建脚本要据此决定怪谁**。混成一个码，调用方只能去正则匹配错误文本，而那串文本是会变的中文。
@@ -201,6 +217,7 @@ file<cpp> main @
 			}
 			if (o.command == "tangle") return cmd_tangle(o);
 			if (o.command == "weave") return cmd_weave(o);
+			if (o.command == "parse") return cmd_parse(o);
 			if (o.command == "serve") return cmd_serve(o);
 			throw Error("nw", 0, "不认识的命令：" + o.command);
 		} catch (Error& e) {
@@ -231,4 +248,4 @@ file<cpp> main @
 
 `serve` 不走 `tangle` 那条路，所以它也是唯一一条**不使用输入文件列表**的命令。它的参数是一个目录，那就不该叫 `files`；但 `Options` 只有一个位置留给"剩下的词"，多加一个字段等于让同一串词有两个去向。这里的选择是：字段叫 `files`，`serve` 自己知道它指的是目录。
 
-到这里，入口齐了：三条命令、三个退出码、一个 `catch`。剩下的章讲另外两个出口的实现——`weave` 怎么把同一份源排成一本能读的书，`serve` 怎么把那些页摆出去。
+到这里，入口齐了：四条命令、三个退出码、一个 `catch`。剩下的章讲另外两个出口的实现——`weave` 怎么把同一份源排成一本能读的书，`serve` 怎么把那些页摆出去。

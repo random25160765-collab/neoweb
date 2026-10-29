@@ -52,22 +52,30 @@
 
 ## 二、左栏
 
-左栏是整本书的目录，常驻在每一页上。它只做三件事：部名分段、篇名成行、当前篇加重。
+左栏是整本书的目录，常驻在每一页上。它只做三件事：部名分段、篇名成行、当前篇加重。部可以嵌套，所以它是一个递归；缩进交给样式里的一层 `.sub`，数据这边不必记"我在第几层"——**深度是排版问题，不是数据问题**。
 
 << 左栏 >>= @
-	// 左栏：部 → 篇，当前篇加重。名字来自各篇自己的 `# 标题`，不来自目录。
-	string nav_html(const Book& book, const string& here) {
+	// 左栏：部 → 篇，当前篇加重。名字来自各篇自己的 `# 标题`，不来自书。
+	// 部可以嵌套：子部裹进一层 .sub，缩进交给样式，数据里不记深度。
+	string nav_parts(const vector<Part>& parts, const string& here) {
 		std::ostringstream out;
-		if (!book.title.empty())
-			out << "<a class=\"title\" href=\"index.html\">" << html_escape(book.title) << "</a>";
-		for (const Part& p : book.parts) {
-			out << "<div class=\"part\">" << html_escape(p.title) << "</div>";
+		for (const Part& p : parts) {
+			if (!p.title.empty()) out << "<div class=\"part\">" << html_escape(p.title) << "</div>";
 			for (const string& f : p.files) {
 				string s = slug(f);
 				out << "<a" << (s == here ? " class=\"here\"" : "") << " href=\"" << html_escape(s)
 				    << ".html\">" << html_escape(page_title(f)) << "</a>";
 			}
+			if (!p.kids.empty()) out << "<div class=\"sub\">" << nav_parts(p.kids, here) << "</div>";
 		}
+		return out.str();
+	}
+
+	string nav_html(const Book& book, const string& here) {
+		std::ostringstream out;
+		if (!book.title.empty())
+			out << "<a class=\"title\" href=\"index.html\">" << html_escape(book.title) << "</a>";
+		out << nav_parts(book.parts, here);
 		// 两棵树不是"篇"，但它们是整本书的两个视图，所以也得从每一页进得去。
 		out << "<div class=\"part" << (here == "tree" ? " here" : "") << "\">图</div>";
 		out << "<a href=\"tree.html#ns\">命名空间树</a><a href=\"tree.html#code\">文件树</a>";
@@ -112,20 +120,33 @@
 
 ## 四、目录页
 
-整本书还要有一个入口页：按部列出所有篇。它不是首页文章，是一张**索引**——所以它不套左栏的当前篇高亮（没有一个"当前"），也不带上下章。
+整本书还要有一个入口页：按部列出所有篇。它不是首页文章，是一张**索引**——所以它不套左栏的当前篇高亮（没有一个"当前"），也不带上下章。部嵌套时标题层级跟着深度走，最深收到 `<h6>`：再深就不是目录，是迷宫了。
 
 << 目录页 >>= @
 	// 目录页：按部列出全部篇。它是索引，不是文章：没有"当前篇"，也没有上下章。
+	// 部可以嵌套，标题层级跟着深度走；散篇没有部名，就只剩一张列表。
+	string index_parts(const vector<Part>& parts, int depth) {
+		std::ostringstream out;
+		int level = depth + 2 > 6 ? 6 : depth + 2;
+		for (const Part& p : parts) {
+			if (!p.title.empty())
+				out << "<h" << level << ">" << html_escape(p.title) << "</h" << level << ">\n";
+			if (!p.files.empty()) {
+				out << "<ul class=\"toc\">\n";
+				for (const string& f : p.files)
+					out << "<li><a href=\"" << html_escape(slug(f)) << ".html\">" << html_escape(page_title(f))
+					    << "</a></li>\n";
+				out << "</ul>\n";
+			}
+			out << index_parts(p.kids, depth + 1);
+		}
+		return out.str();
+	}
+
 	string index_html(const Book& book) {
 		std::ostringstream out;
 		out << "<h1>" << html_escape(book.title.empty() ? string("目录") : book.title) << "</h1>\n";
-		for (const Part& p : book.parts) {
-			out << "<h2>" << html_escape(p.title) << "</h2>\n<ul class=\"toc\">\n";
-			for (const string& f : p.files)
-				out << "<li><a href=\"" << html_escape(slug(f)) << ".html\">" << html_escape(page_title(f))
-				    << "</a></li>\n";
-			out << "</ul>\n";
-		}
+		out << index_parts(book.parts, 0);
 		return out.str();
 	}
 ~@
@@ -299,7 +320,7 @@
 			}
 			string key = file_key(mt.name, mt.type);
 			auto it = doc.files.find(key);
-			if (it == doc.files.end() || !it->second.defined) continue;
+			if (it == doc.files.end() || !it->second.touched) continue;
 			n.kids.push_back(FsNode::Kid{false, mt.type.empty() ? mt.name : mt.name + suffix_of(mt.type), key});
 		}
 	}
@@ -372,7 +393,9 @@
 	int weave(const Document& doc, const Book& book, const string& outdir) {
 		if (book.parts.empty()) throw Error(doc.main_file, 0, "目录是空的：没有一篇可写");
 		std::filesystem::create_directories(outdir);
-		string vendor = dir_of(book.file) + "/vendor/katex";
+		// vendor 不在书里：它是 `make deps` 放在 tangle/ 下的构建产物，位置是构建约定。
+		// 书在 book/ 下，从书的路径推不出 vendor——这一处没有可推的关系，就不装成能推。
+		string vendor = "tangle/vendor/katex";
 		set<string> used;
 		int n = 0;
 		for (const string& src : book.order) {
@@ -405,4 +428,4 @@ python3 nw3.py tangle -o /tmp/w5 book/skeleton.nw "book/Chapter 3"/*.nw book/Cha
 g++ -std=c++17 -Wall -Wextra -I/tmp/w5 -c /tmp/w5/weave.cpp
 ```
 
-再往下是命令行那一篇的事：给它一个 `weave` 子命令、把 `tangle/book.yaml` 读进来、把页写到 `-o` 指的地方。等那条命令通了，这本书就能自己排自己——**同一份源，一条给编译器，一条给读者**。
+再往下是命令行那一篇的事：给它一个 `weave` 子命令、把 AST 里的书展开成这份渲染树、把页写到 `-o` 指的地方。等那条命令通了，这本书就能自己排自己——**同一份源，一条给编译器，一条给读者**。

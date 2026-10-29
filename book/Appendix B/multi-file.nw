@@ -91,7 +91,7 @@ file<c> pair @
 ## 四、这带来的一件事
 
 ```
-nw tangle -o /tmp/ex book/skeleton.nw "book/Appendix B/multi-file.nw"
+find book -name '*.nw' -print0 | xargs -0 nw tangle -o /tmp/ex
 cc -I/tmp/ex/examples -o /tmp/ex/pair /tmp/ex/examples/pair.c && /tmp/ex/pair
 ```
 
