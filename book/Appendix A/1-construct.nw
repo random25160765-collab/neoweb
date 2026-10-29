@@ -98,9 +98,11 @@ make crosscheck
 << 构建 >>= @
 	CXX      ?= g++
 	CXXFLAGS ?= -std=c++17 -Wall -Wextra
-	# pkg-config 给出两个库的链接参数。它缺席时整行为空，链接期会报未定义符号——
-	# 那时缺的是库，不是这几行。
-	LIBS     := $(shell pkg-config --libs libcmark-gfm source-highlight 2>/dev/null)
+	# pkg-config 给两样东西：头文件路径（--cflags）与链接参数（--libs）。只取后者会漏一样——
+	# Homebrew 的 cmark-gfm 是 keg-only，头不在默认搜索路径里，只在 #include 处失败。
+	PKGS      = libcmark-gfm source-highlight
+	CXXFLAGS += $(shell pkg-config --cflags $(PKGS) 2>/dev/null)
+	LIBS     := $(shell pkg-config --libs $(PKGS) 2>/dev/null)
 	# 篇的路径带空格，make 按空白切词：把空格转义，make 与 sh 两边都认这个写法。
 	SRC      := $(shell find book -name '*.nw' | sort | sed 's/ /\\ /g')
 	# 二进制是 tangle 产物的下游，跟着产物一起放在 tangle/ 下。
