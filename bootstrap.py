@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""neoweb v3 原型：parse → AST（chunk 树 + 代码树 + 书）→ check → tangle。
+"""neoweb v3 的破点：parse → AST（chunk 树 + 代码树 + 书）→ check → tangle。
 
 对着 docs/granmmerv3.nw 实现。这是验证语法的原型，不是 C++ 实现。
+它的两个岗位：第一次铺 tangle/（那时二进制还不存在），以及 crosscheck 的对照物。
 
 用法：
-    python3 nw3.py check  源.nw
-    python3 nw3.py tangle -o 输出目录 源.nw
-    python3 nw3.py parse  [--ast] 源.nw
-    python3 nw3.py ast    源.nw          # 等价于 parse --ast
+    python3 bootstrap.py check  源.nw
+    python3 bootstrap.py tangle -o 输出目录 源.nw
+    python3 bootstrap.py parse  [--ast] 源.nw
+    python3 bootstrap.py ast    源.nw          # 等价于 parse --ast
 """
 
 import json
@@ -231,11 +232,13 @@ class Parser:
     def feed(self, no, raw):
         # 围栏内：原样。块外结构层与 chunk 体统一处理。
         if self.fence:
+            # 关栏那一行本身不落盘：它只是给解析器看的，不是内容。
+            if raw.strip().startswith(self.fence):
+                self.fence = ""
+                return
             if self._in_chunk():
                 self.cur_lines.append(Line("lit", raw, no))
             # else: 结构层围栏里的行忽略（weave 用）
-            if raw.strip().startswith(self.fence):
-                self.fence = ""
             return
         m = RE_FENCE.match(raw.strip())
         if m and not self._in_file():
@@ -900,55 +903,104 @@ class Document:
                 self.errors.append(
                     f"{self.fname}:0: file {name}<{typ or '无类型'}> 挂载了 {f.mounted} 次")
 
-        # 4. 实例解析 + 循环检测
-        for f in self.files.values():
-            for inst in f.body:
-                self._check_inst(inst, [])
-        for ch in self.chunks.values():
-            for ln in ch.lines:
-                if ln.kind != "inst":
-                    continue
-                for nm in ln.names:
-                    self._check_inst(Inst(nm, ln.ns, ln.no), [ch.name])
+        # 4. 实例计数：每个实例点只解析一次
+        #    这一步与图长什么样无关——diamond 不会在这里被放大。
+        self._scan_instances()
 
-        # 5. 不可达 chunk（无实例化）
+        # 5. 环检测：显式栈 + 记忆化，整体 O(顶点 + 边)
+        self._check_cycles()
+
+        # 6. 不可达 chunk（没有任何实例点引用它）
         for name, ch in self.chunks.items():
             if ch.mounted == 0:
                 self.warnings.append(
                     f"{self.fname}:{ch.no}: chunk {name} 不可达（实现了但没有实例化）")
 
-        # 6. ns 名与 chunk 名冲突（同一全名即同一父作用域下的同名）
+        # 7. ns 名与 chunk 名冲突（同一全名即同一父作用域下的同名）
         for full in self.p.ns_decls:
             if full in self.chunks:
                 self.errors.append(
                     f"{self.fname}:0: 命名空间 {full} 与同名 chunk 冲突")
 
-        # 7. 物理路径唯一
+        # 8. 物理路径唯一
         seen = {}
         self._walk_paths("", self.dirs.get("top"), seen)
         return self.errors, self.warnings
 
-    def _check_inst(self, inst, stack):
+    def _scan_instances(self):
+        """每个实例点解析一次：未定义就报错，定义了就给它的引用计数加一。
+
+        旧写法是"每个 chunk 当一次根，把自己的下游重走一遍"，成本是
+        O(顶点 × 平均路径长度)；diamond 上更是 O(路径数)。计数不需要走图——
+        把"数点"与"找环"拆开，这一步就只跟实例点个数有关。
+        """
+        for f in self.files.values():
+            for inst in f.body:
+                self._resolve_site(inst.name, inst.ns, inst.no)
+        for ch in self.chunks.values():
+            for ln in ch.lines:
+                if ln.kind != "inst":
+                    continue
+                for nm in ln.names:
+                    self._resolve_site(nm, ln.ns, ln.no)
+
+    def _resolve_site(self, name, ns, no):
         try:
-            ch = self.resolve(inst.name, inst.ns)
+            ch = self.resolve(name, ns)
         except KeyError:
-            full = inst.name if "::" in inst.name else ns_join(inst.ns, inst.name)
-            msg = f"{self.fname}:{inst.no}: 未定义的 chunk：{full}"
+            full = name if "::" in name else ns_join(ns, name)
+            msg = f"{self.fname}:{no}: 未定义的 chunk：{full}"
             if msg not in self.errors:
                 self.errors.append(msg)
-            return
-        ch.mounted += 1
-        if ch.name in stack:
-            self.errors.append(
-                f"{self.fname}:{inst.no}: chunk 循环实例化：{' → '.join(stack + [ch.name])}")
-            return
-        if ch.todo:
-            return
-        for ln in ch.lines:
-            if ln.kind != "inst":
+            return None
+        ch.mounted += 1          # 按实例点计：同一点只加一次
+        return ch
+
+    def _check_cycles(self):
+        """显式栈 DFS：active 是祖先链，done 是记忆化。
+
+        每个块完整走一次就进 done，所以整体是 O(顶点 + 边)；
+        递归版在 diamond 上会把同一个块按路径重走，路径数是指数的。
+        栈深也不再受 Python 递归上限约束——2000 层链照走。
+        """
+        done = set()
+        for root in self.chunks.values():
+            if root.name in done:
                 continue
-            for nm in ln.names:
-                self._check_inst(Inst(nm, ln.ns, ln.no), stack + [ch.name])
+            # 帧：[块, 下一行下标, 下一名字下标]
+            stack = [[root, 0, 0]]
+            active = {root.name}
+            while stack:
+                frame = stack[-1]
+                ch = frame[0]
+                if frame[1] >= len(ch.lines):
+                    active.discard(ch.name)
+                    done.add(ch.name)
+                    stack.pop()
+                    continue
+                ln = ch.lines[frame[1]]
+                if ln.kind != "inst":
+                    frame[1] += 1
+                    continue
+                if frame[2] >= len(ln.names):
+                    frame[1] += 1
+                    frame[2] = 0
+                    continue
+                nm = ln.names[frame[2]]
+                frame[2] += 1
+                try:
+                    target = self.resolve(nm, ln.ns)
+                except KeyError:
+                    continue         # 未定义已由 _scan_instances 报过
+                if target.name in active:
+                    path = [fr[0].name for fr in stack] + [target.name]
+                    self.errors.append(
+                        f"{self.fname}:{ln.no}: chunk 循环实例化：{' → '.join(path)}")
+                    continue
+                if target.todo or target.name in done:
+                    continue         # 待办块没有下游；走过的块不必再走
+                active.add(target.name)
+                stack.append([target, 0, 0])
 
     def _walk_paths(self, prefix, node, seen):
         if node is None:
@@ -972,26 +1024,60 @@ class Document:
 
     # ------------------------------------------------ 展开（tangle）
 
-    def expand(self, ch, stack, indent):
-        if ch.name in stack:
-            raise NWError(ch.no, f"chunk 循环实例化：{ch.name}")
-        if ch.todo:
-            return []
-        out = []
-        for ln in ch.lines:
-            if ln.kind == "inst":
-                for nm in ln.names:
-                    target = self.resolve(nm, ln.ns)
-                    out.extend(self.expand(target, stack + [ch.name], indent + ln.indent))
-            else:
-                out.append(indent + ln.text if ln.text else "")
+    def expand(self, ch, out, indent=""):
+        """把一块展开出的行直接追加进 out（显式栈，不递归）。
+
+        为什么不用递归：深度由源决定，不由代码决定。一条两千层的链会让递归版
+        撞上 Python 的栈上限——那是"源合法、工具崩"，而 setrecursionlimit 只是
+        把崩点推后。为什么不让每一层返回列表：返回再拼接要拷贝整棵子树，
+        链式展开就是 O(n²)；这里每条输出行只追加一次，整体 O(输出行数)。
+
+        工作项三态：("line", 文本) 直接产出；("enter", 块, 缩进) 进一块；
+        ("leave", 名字) 出一块，把它从祖先链上摘掉。
+        """
+        active = set()               # 祖先链：正在谁里面。不用"访问过的集合"——
+        stack = [("enter", ch, indent)]   # 同一块被两处引用是合法复用
+        while stack:
+            item = stack.pop()
+            kind = item[0]
+            if kind == "line":
+                out.append(item[1])
+                continue
+            if kind == "leave":
+                active.discard(item[1])
+                continue
+            _, cur, ind = item
+            if cur.name in active:
+                raise NWError(cur.no, f"chunk 循环实例化：{cur.name}")
+            if cur.todo:
+                continue             # 还没写完：展开成空，不把半截代码贴进产物
+            active.add(cur.name)
+            stack.append(("leave", cur.name))
+            # 逆序压：弹出顺序才是文本顺序。一行多实例时名字也要逆序，
+            # 否则 | 接线的先后会反过来。
+            for ln in reversed(cur.lines):
+                if ln.kind != "inst":
+                    stack.append(("line", ind + ln.text if ln.text else ""))
+                    continue
+                for nm in reversed(ln.names):
+                    stack.append(("enter", self._resolve_required(nm, ln.ns, ln.no),
+                                  ind + ln.indent))
         return out
+
+    def _resolve_required(self, name, ns, no):
+        """展开阶段的名字解析：未定义也走 NWError，不让 KeyError 冒成 Traceback。"""
+        try:
+            return self.resolve(name, ns)
+        except KeyError:
+            full = name if "::" in name else ns_join(ns, name)
+            raise NWError(no, f"未定义的 chunk：{full}") from None
 
     def file_text(self, f):
         out = []
         for inst in f.body:
-            ch = self.resolve(inst.name, inst.ns)
-            part = self.expand(ch, [], "")
+            ch = self._resolve_required(inst.name, inst.ns, inst.no)
+            part = []
+            self.expand(ch, part)
             if not part:
                 continue                 # 待办块、空块：不产出，也不留一个孤零零的空行
             if out:
@@ -1140,7 +1226,12 @@ def main(argv):
             title = doc.book.title or doc.book.name
             print(f"书：{title}，收录 {len(doc.order)} 篇（输入 {len(paths)} 篇）")
         return 0
-    written = doc.tangle(outdir)
+    try:
+        written = doc.tangle(outdir)
+    except NWError as e:
+        # 与 check 同一个格式：源写错了就该看到 file:line: 一句话，不是 Traceback。
+        print(f"error: {doc.fname}:{e.no}: {e.msg}")
+        return 1
     for w in written:
         print("写出", w)
     return 0

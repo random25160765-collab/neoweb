@@ -1136,7 +1136,7 @@ file<svg> nw-dark @
 	## Relationship to `nw`
 
 	The extension does not parse `.nw`. It only displays and types. Structure is settled by
-	`nw check` and `nw tangle`:
+	`nw tangle --check`, which reads and reports without writing a byte; `nw tangle` is what writes:
 
 	What looks right in the editor is not necessarily tangleable; being tangleable is what counts.
 ~@

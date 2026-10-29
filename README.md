@@ -62,7 +62,7 @@ make deps NPMFLAGS=--registry=https://registry.npmmirror.com
 
 ```
 book/            source: prose, grammar and implementation, all hand-written
-nw3.py           bootstrap: a tangle-only Python port, used for the first run
+bootstrap.py     the bootstrap port: first run and crosscheck reference
 Makefile         hand-written meta layer: find sources, bootstrap once, forward
 tangle/          products: sources, Makefile, examples/, editor/, build/nw
 weave/           products: HTML (one page per chapter + index.html + tree.html)

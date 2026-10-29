@@ -468,7 +468,7 @@ v2 里这件事不用算：chunk 名里就带着路径（`<<src/sort.c: merge_so
 验收仍是编译这一层（同样带临时豁免，等接线的人出现就取消）：
 
 ```
-python3 nw3.py tangle -o /tmp/w5 book/skeleton.nw "book/Chapter 3"/*.nw book/Chapter\ 4/1-cli.nw book/Chapter\ 5/*.nw
+python3 bootstrap.py tangle -o /tmp/w5 book/skeleton.nw "book/Chapter 3"/*.nw book/Chapter\ 4/1-cli.nw book/Chapter\ 5/*.nw
 g++ -std=c++17 -Wall -Wextra -Wno-unused-function -I/tmp/w5 -c /tmp/w5/weave.cpp
 ```
 

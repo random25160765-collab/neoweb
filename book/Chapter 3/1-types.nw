@@ -234,11 +234,22 @@ v2 靠字符串前缀（`\x01`、`\x02`）在文本里打标记，展开时再�
 			return file + ": " + msg;
 		}
 	};
+
+	// 一次检查的出口：已经格式化成 "file:12: 什么错"，命令行只加前缀。
+	// 不用异常收集：一处错误抛一次，用户就得改一处跑一次；这里一次把话说完。
+	struct Report {
+		vector<string> errors;
+		vector<string> warnings;
+	};
 ~@
+
+`Report` 里存的是**拼好的字符串**，不是 `Error`：检查一旦返回，调用方要做的只有"加个前缀打出来"，不该再有第二个人决定怎么拼。`Error` 是抛着走的，`Report` 是收着走的——两种用途，两个类型，不共享一个"差不多"的结构。
+
+警告也走这里，因为它们的归宿与错误一样：终端上的一行字。区别只在调用方怎么处理——错误决定退出码，警告不决定。
 
 ## 六、接口
 
-声明按阶段排：工具、解析、综合、展开、站点、命令行。顺序就是调用顺序。
+声明按阶段排：工具、解析、综合、检查、展开、站点、命令行。顺序就是调用顺序。
 
 << 接口 >>= @
 	// ---- 文本工具（util.cpp）----
@@ -267,6 +278,10 @@ v2 靠字符串前缀（`\x01`、`\x02`）在文本里打标记，展开时再�
 	               const string& file, int at_line);
 	string file_text(const Document& doc, const FileNode& f, bool line_mode);
 	int tangle(const Document& doc, const string& outdir, bool line_mode);
+
+	// ---- 检查（tangle.cpp）----
+	// 只读 Document：不建目录、不写一个字节。--check 与 make check 都走这里。
+	Report check(const Document& doc);
 
 	// ---- 展开（weave.cpp）----
 	// 清单树从 AST 里长出来：顺序只有一份，weave 不再读第二份文件。

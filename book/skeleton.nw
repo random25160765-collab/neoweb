@@ -9,6 +9,7 @@ dir top @
 	file<cpp> util;
 	file<cpp> parse;
 	file<cpp> tangle;
+	file<hpp> templates;
 	file<cpp> weave;
 	file<cpp> main;
 	file<cpp> serve;
@@ -19,9 +20,9 @@ dir top @
 
 注意这里面**没有** `dir tangle`：`top` 已经是 `tangle/` 了，再挂一层就成了 `tangle/tangle/`。上一版把输出根当成仓库根，于是产物散了一地——`tangle/`、`examples/`、`editor/`、`Makefile`、`nw` 全在仓库根上，哪些是写的、哪些是铺的，得靠 `.gitignore` 才看得出来。
 
-现在这条界线只有一句：**生成的都在 `tangle/` 下，仓库根只放手写的**。`book/`、`nw3.py`、根 `Makefile`、README、LICENSE、`docs/`、`.github/`、`assets/` 是人写的；`tangle/` 与 `weave/` 是铺出来的。
+现在这条界线只有一句：**生成的都在 `tangle/` 下，仓库根只放手写的**。`book/`、`bootstrap.py`、根 `Makefile`、README、LICENSE、`docs/`、`.github/`、`assets/` 是人写的；`tangle/` 与 `weave/` 是铺出来的。
 
-`top` 下的这棵树是"工具 + 例子 + 插件"的全部：七个文件——模型（`nw.hpp`）、工具（util）、三个阶段（parse、tangle、weave）、站点（serve）、入口（main）；再加一份构建规则（`Makefile`）。这里**没有**书的目录：那已经不是产物了，它就在源里（`book/menu.nw`）。
+`top` 下的这棵树是"工具 + 例子 + 插件"的全部：八个文件——模型（`nw.hpp`）、工具（util）、三个阶段（parse、tangle、weave）、站点（serve）、入口（main）、`init` 的模板（templates）；再加一份构建规则（`Makefile`）。这里**没有**书的目录：那已经不是产物了，它就在源里（`book/menu.nw`）。
 
 注意这里只有**挂载**（`file ...;`），没有内容。内容在别的篇里用 `file ... @` 定义，两边靠名字对上。挂载与定义分开，是 v3 与 v2 最大的不同之一：文件出现在哪个目录，和它的内容写在哪一篇，是两件事。
 
@@ -69,6 +70,6 @@ dir icons @
 
 书稿自己（`book/*.nw`）不在骨架里。它是源，不是产物——自举的边界就在这里：tangle 铺出 `tangle/`，`book/` 由人写。
 
-仓库里还有几样东西也不在这张图上：`nw3.py`（破点，手写；它若成了产物，自举就成环）、`test_nw3.py`（它的用例）、根 `Makefile`（元层转发，手写；附录 A）、`LICENSE`、`.github/`、`docs/`、`assets/`、`README.md`。它们各自有主人，但都不是 tangle。骨架只回答一个问题：**这本书铺出来的是哪棵树**——把仓库里每一个文件都塞进来，回答的就不是这个问题了。
+仓库里还有几样东西也不在这张图上：`bootstrap.py`（破点，手写；它若成了产物，自举就成环）、`test_bootstrap.py`（它的用例）、根 `Makefile`（元层转发，手写；附录 A）、`LICENSE`、`.github/`、`docs/`、`assets/`、`README.md`。它们各自有主人，但都不是 tangle。骨架只回答一个问题：**这本书铺出来的是哪棵树**——把仓库里每一个文件都塞进来，回答的就不是这个问题了。
 
 `Makefile` 是唯一一份构建规则产物，它落在 `tangle/` 里，内容在附录 A。仓库根那份手写的 `Makefile` 只负责第一次与转发——它必须在根被 `make` 找到，而它不能挂在 `top` 里，因为 `top` 是 `tangle/`。

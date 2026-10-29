@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""nw3 的用例。跑法：python3 test_nw3.py
+"""破点的用例。跑法：python3 test_bootstrap.py
 
 v3 的每份源都要有一本书：用例把 t.nw 当成那一篇，另写一份 book.nw 收它。
 篇的路径与命令行给的一致（都在临时目录里用相对路径），这是 merge 对号的方式。
@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-NW3 = os.path.join(HERE, "nw3.py")
+BOOT = os.path.join(HERE, "bootstrap.py")
 
 fails = []
 passed = 0
@@ -43,32 +43,42 @@ def _write(d, files):
             f.write(text)
 
 
-def _run(args, files):
-    """把文件写进临时目录，在那里跑一次，返回 (returncode, stdout+stderr)。"""
+def _run(args, files, timeout=60):
+    """把文件写进临时目录，在那里跑一次，返回 (returncode, stdout+stderr)。
+
+    timeout 是硬上限：规模用例（chain 2000、diamond 22）在这里判"退回平方/指数"，
+    卡住比报错更该被看见——超时按失败记，不是让整个套件挂在那里。
+    """
     d = tempfile.mkdtemp()
     try:
         _write(d, files)
         names = sorted(files)
-        r = subprocess.run([sys.executable, NW3] + args + names,
-                           cwd=d, capture_output=True, text=True)
+        try:
+            r = subprocess.run([sys.executable, BOOT] + args + names,
+                               cwd=d, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(f"超时（{timeout}s）：{' '.join(args)}") from None
         return r.returncode, r.stdout + r.stderr
     finally:
         shutil.rmtree(d)
 
 
-def run(args, src, extra=None, book=BOOK):
-    return _run(args, _files(src, extra, book))
+def run(args, src, extra=None, book=BOOK, timeout=60):
+    return _run(args, _files(src, extra, book), timeout)
 
 
-def tangle_content(src, relpath, extra=None, book=BOOK):
+def tangle_content(src, relpath, extra=None, book=BOOK, timeout=60):
     """跑 tangle，返回产物的内容（找不到返回 None）。"""
     d = tempfile.mkdtemp()
     try:
         files = _files(src, extra, book)
         _write(d, files)
         outdir = os.path.join(d, "out")
-        r = subprocess.run([sys.executable, NW3, "tangle", "-o", outdir] + sorted(files),
-                           cwd=d, capture_output=True, text=True)
+        try:
+            r = subprocess.run([sys.executable, BOOT, "tangle", "-o", outdir] + sorted(files),
+                               cwd=d, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(f"超时（{timeout}s）：tangle {relpath}") from None
         if r.returncode:
             raise AssertionError(f"tangle 失败：{r.stdout}{r.stderr}")
         target = os.path.join(outdir, relpath)
@@ -80,10 +90,10 @@ def tangle_content(src, relpath, extra=None, book=BOOK):
         shutil.rmtree(d)
 
 
-def eq(name, src, relpath, want, extra=None, book=BOOK):
+def eq(name, src, relpath, want, extra=None, book=BOOK, timeout=60):
     global passed
     try:
-        got = tangle_content(src, relpath, extra, book)
+        got = tangle_content(src, relpath, extra, book, timeout)
         if got != want:
             fails.append(f"{name}\n  got : {got!r}\n  want: {want!r}")
         else:
@@ -92,22 +102,39 @@ def eq(name, src, relpath, want, extra=None, book=BOOK):
         fails.append(f"{name}\n  {e}")
 
 
-def bad(name, src, needle, extra=None, book=BOOK):
+def _check(name, src, extra, book, timeout):
+    """跑一次 check。超时就记一条失败，不中断整个套件。"""
+    try:
+        return run(["check"], src, extra, book, timeout)
+    except AssertionError as e:
+        fails.append(f"{name}\n  {e}")
+        return None
+
+
+def bad(name, src, needle, extra=None, book=BOOK, timeout=60):
     """check 必须失败，而且输出里有 needle。"""
     global passed
-    rc, out = run(["check"], src, extra, book)
+    got = _check(name, src, extra, book, timeout)
+    if got is None:
+        return
+    rc, out = got
     if rc == 0:
         fails.append(f"{name}\n  没有报错")
     elif needle not in out:
         fails.append(f"{name}\n  got : {out.strip()}\n  want 含: {needle}")
+    elif "Traceback" in out:
+        fails.append(f"{name}\n  报了 Traceback，应该是 file:line: 一句话：\n{out.strip()}")
     else:
         passed += 1
 
 
-def ok(name, src, needle="", extra=None, book=BOOK):
+def ok(name, src, needle="", extra=None, book=BOOK, timeout=60):
     """check 必须通过。"""
     global passed
-    rc, out = run(["check"], src, extra, book)
+    got = _check(name, src, extra, book, timeout)
+    if got is None:
+        return
+    rc, out = got
     if rc != 0:
         fails.append(f"{name}\n  不该报错却报了：{out.strip()}")
     elif needle and needle not in out:
@@ -116,14 +143,33 @@ def ok(name, src, needle="", extra=None, book=BOOK):
         passed += 1
 
 
-def warn(name, src, needle, extra=None, book=BOOK):
+def warn(name, src, needle, extra=None, book=BOOK, timeout=60):
     """check 通过但有警告。"""
     global passed
-    rc, out = run(["check"], src, extra, book)
+    got = _check(name, src, extra, book, timeout)
+    if got is None:
+        return
+    rc, out = got
     if rc != 0:
         fails.append(f"{name}\n  报错了：{out.strip()}")
     elif needle not in out:
         fails.append(f"{name}\n  警告里没有 {needle!r}：{out.strip()}")
+    else:
+        passed += 1
+
+
+def once(name, src, needle, extra=None, book=BOOK, timeout=60):
+    """check 必须失败，而且 needle 只出现一次：环不该按路径报 N 遍。"""
+    global passed
+    got = _check(name, src, extra, book, timeout)
+    if got is None:
+        return
+    rc, out = got
+    n = out.count(needle)
+    if rc == 0:
+        fails.append(f"{name}\n  没有报错")
+    elif n != 1:
+        fails.append(f"{name}\n  {needle!r} 出现了 {n} 次：\n{out.strip()}")
     else:
         passed += 1
 
@@ -189,6 +235,26 @@ dir book @
 """,
    "book/hello_world.c",
    '#include<stdio.h>\n\nint main() {\n\tprintf("hello world!\\n");\n\treturn 0;\n}\n')
+
+eq("围栏：块内的 << 与 ~@ 是字面，围栏行不落盘",
+   """\
+dir top @
+	file<md> a;
+~@
+file<md> a @
+	<< tpl >>
+~@
+<< tpl >>= @
+	````
+	line one
+	<< not-a-chunk >>
+	~@
+	````
+	last
+~@
+""",
+   "a.md",
+   "line one\n<< not-a-chunk >>\n~@\nlast\n")
 
 # ================================================================ 命名空间
 
@@ -930,6 +996,64 @@ file<c> a @
          lambda d: None if d["book"]["order"] == ["t.nw"]
          and d["files"]["a<c>"]["insts"] == ["p"]
          else f"结构不对：{d['book']} / {d['files']}")
+
+# ================================================================ 规模：形状不该决定成本
+
+def diamond_src(n, exits=3):
+    """n 层、每层 exits 个出口：块数只有 n，路径数是 exits^(n-1)。
+
+    这是"按路径走图"的实现最容易露馅的形状：块并不多，探的路却指数级。
+    出口取三个而不是两个，是为了让判据落在算法上而不是机器速度上：
+    两个出口时旧实现只要 6.9 秒，"快机器能过"会把回归放走。
+    """
+    s = ["dir top @", "\tfile<c> a;", "~@", "file<c> a @", "\t<< d0 >>", "~@"]
+    for i in range(n):
+        s.append(f"<< d{i} >>= @")
+        s += [f"\t<< d{i + 1} >>"] * exits if i < n - 1 else ["\tx"]
+        s.append("~@")
+    return "\n".join(s) + "\n"
+
+
+def chain_src(n):
+    """n 层一条链：c0 → c1 → … → c(n-1)，每层一行字。
+
+    深度由源决定：递归实现在这里撞栈；逐层返回列表的实现在这里是 O(n²) 拷贝。
+    """
+    s = ["dir top @", "\tfile<c> a;", "~@", "file<c> a @", "\t<< c0 >>", "~@"]
+    for i in range(n):
+        s.append(f"<< c{i} >>= @")
+        s.append(f"\tl{i}")
+        if i < n - 1:
+            s.append(f"\t<< c{i + 1} >>")
+        s.append("~@")
+    return "\n".join(s) + "\n"
+
+
+ok("diamond 22：22 层三出口，check 走块不走路径", diamond_src(22), timeout=10)
+
+ok("chain 2000：check 不吃调用栈", chain_src(2000), timeout=20)
+
+eq("chain 2000：tangle 直接追加，不逐层返回",
+   chain_src(2000), "a.c",
+   "".join(f"l{i}\n" for i in range(2000)),
+   timeout=20)
+
+once("环只报一次：a → b → a 不按路径重复",
+     """\
+dir top @
+	file<c> a;
+~@
+file<c> a @
+	<< p >>
+~@
+<< p >>= @
+	<< q >>
+~@
+<< q >>= @
+	<< p >>
+~@
+""",
+     "循环实例化")
 
 # ================================================================ 汇总
 

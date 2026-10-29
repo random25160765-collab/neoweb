@@ -62,7 +62,7 @@ make deps NPMFLAGS=--registry=https://registry.npmmirror.com
 
 ```
 book/            源：散文 + 语法 + 实现，全部由人写
-nw3.py           破点：只做 tangle 的 Python 实现，负责第一次
+bootstrap.py     破点：Python 实现，负责第一次与 crosscheck 对照
 Makefile         手写元层：找源、首次 bootstrap、转发
 tangle/          产物：源码、Makefile、examples/、editor/、build/nw
 weave/           产物：HTML（每篇一页 + index.html + tree.html）

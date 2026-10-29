@@ -254,7 +254,7 @@ part 第 1 章 为什么是文学编程 @
 
 ### 5.2 测试与示例
 
-`test_nw3.py` 的 27 个用例大多用单文件 tangle，每个都要带一个最小 book：
+`test_bootstrap.py` 的 27 个用例大多用单文件 tangle，每个都要带一个最小 book：
 
 ```
 book t @

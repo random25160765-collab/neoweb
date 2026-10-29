@@ -27,5 +27,5 @@ Makefile: ;
 SRC := $(shell find book -name '*.nw' | sort | sed 's/ /\\ /g')
 
 %: FORCE
-	@test -f tangle/Makefile || $(PYTHON) nw3.py tangle -o tangle $(SRC)
+	@test -f tangle/Makefile || $(PYTHON) bootstrap.py tangle -o tangle $(SRC)
 	@$(MAKE) --no-print-directory -f tangle/Makefile $@

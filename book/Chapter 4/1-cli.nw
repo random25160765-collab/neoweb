@@ -4,7 +4,7 @@
 
 命令行只做三件事：**认参数**、**分派**、**决定退出码**。它不解析 `.nw`、不展开、不写盘——那些都在别的篇里。它负责的是另一件事：人敲下去之后，工具不能沉默。
 
-四条命令：`tangle` 给编译器，`weave` 给读者，`parse` 给工具（插件与脚本看装配清单），`serve` 把 `weave` 的产物摆到浏览器里。前三条共享同一份源，出口不同。这一篇把四条都接上。
+五条命令：`tangle` 给编译器，`weave` 给读者，`parse` 给工具（插件与脚本看装配清单），`serve` 把 `weave` 的产物摆到浏览器里，`init` 给一个空目录铺出能跑的最小项目。前四条共享同一份源，出口不同；`init` 不读源——它写的是起点。
 
 ## 一、接线
 
@@ -13,20 +13,24 @@ file<cpp> main @
 	<< 用法 >>
 	<< 参数 >>
 	<< 分派 >>
+	<< init >>
 	<< run 本体 >>
 	<< main 的尾 >>
 ~@
 
 ## 二、头
 
+`templates.hpp` 是 `init` 的五份模板，只有 `main.cpp` 用它，所以由这里 include——模板不是这个文件的边界，只是一段数据。
+
 << main 的头 >>= @
 	#include "nw.hpp"
+	#include "templates.hpp"
 
 	namespace nw {
 	namespace {
 ~@
 
-`usage`、`read_args`、`cmd_tangle` 三个只在文件内用，放匿名命名空间；`run` 是公开的，`nw.hpp` 里有声明。
+`usage`、`read_args`、`cmd_tangle`、`cmd_init` 四个只在文件内用，放匿名命名空间；`run` 是公开的，`nw.hpp` 里有声明。
 
 ## 三、用法：写给敲错的人
 
@@ -34,17 +38,19 @@ file<cpp> main @
 
 不写"更多信息见别处"。用法串把人推去另一个地方找答案，等于承认它自己说不清。
 
-四条命令的用法写在同一个串里，不按命令分片输出：读者敲错时想看到的是全貌，而不是"你敲的这一条怎么用"。开关各归各行，读的人自己挑。
+五条命令的用法写在同一个串里，不按命令分片输出：读者敲错时想看到的是全貌，而不是"你敲的这一条怎么用"。开关各归各行，读的人自己挑。
 
 << 用法 >>= @
 	// 用法串只回答两个问题：命令长什么样、每个开关改变什么。
 	const char* usage() {
 		return "用法：\n"
-		       "  nw tangle [-o 目录] [-d|--debug] 篇...\n"
+		       "  nw tangle [--check] [-o 目录] [-d|--debug] 篇...\n"
 		       "  nw weave  [-o 目录] [-m|--markdown] 篇...\n"
 		       "  nw parse  [--ast] 篇...\n"
 		       "  nw serve  [-p 端口] [目录]\n"
+		       "  nw init   [目录]\n"
 		       "\n"
+		       "  --check      只检查、不写盘；引用错了这里就报，退出码由它决定\n"
 		       "  -o 目录      产物写到哪里（默认当前目录）\n"
 		       "  -d, --debug  产物里插 #line，让编译错误指回 .nw\n"
 		       "  -m, --markdown  weave 出 markdown（镜像书的目录），默认出 HTML\n"
@@ -78,6 +84,7 @@ v3 的 `weave` 不再有 `-b`：书的目录是源里的 `book` 结构，跟着 
 		bool debug = false;
 		bool markdown = false;   // weave 的出口：默认 HTML，-m 换 markdown
 		bool ast = false;        // parse 的出口：默认一行摘要，--ast 出 JSON
+		bool check_only = false; // tangle 的出口：--check 只查不写盘
 		vector<string> files;
 	};
 
@@ -85,7 +92,7 @@ v3 的 `weave` 不再有 `-b`：书的目录是源里的 `book` 结构，跟着 
 		return cmd == "-h" || cmd == "--help" || cmd == "help";
 	}
 
-	// 手写解析：五个开关、两个取值，撑不起一个 getopt 依赖。
+	// 手写解析：六个开关、两个取值，撑不起一个 getopt 依赖。
 	Options read_args(int argc, char** argv) {
 		if (argc < 2) throw Error("nw", 0, "缺少子命令");
 		Options o;
@@ -113,6 +120,8 @@ v3 的 `weave` 不再有 `-b`：书的目录是源里的 `book` 结构，跟着 
 				o.markdown = true;
 			} else if (a == "--ast") {
 				o.ast = true;
+			} else if (a == "--check") {
+				o.check_only = true;
 			} else if (!a.empty() && a[0] == '-') {
 				throw Error("nw", 0, "不认识的开关：" + a);
 			} else {
@@ -129,9 +138,9 @@ v3 的 `weave` 不再有 `-b`：书的目录是源里的 `book` 结构，跟着 
 
 报错里的文件名写的是 `nw`，不是空串：`where()` 拼出来就是 `nw: 缺少子命令`，与系统里任何一条命令同一个口吻。空串会拼出一个以冒号开头的怪句子，读者第一眼看到的是标点。
 
-## 五、分派：四条命令，三个退出码
+## 五、分派：五条命令，三个退出码
 
-四条命令的分派都只有四步：读全部篇、并成一份文档、调对应的阶段、报一句数量。`tangle`、`weave`、`parse` 前两步完全一样——同一份源，三个出口。
+其余四条的分派都只有四步：读全部篇、并成一份文档、调对应的阶段、报一句数量。`tangle`、`weave`、`parse` 前两步完全一样——同一份源，三个出口。`init` 不读源，所以它在 `load` 之前就分派出去了。
 
 **并表的顺序不归命令行管**：命令行只给"有哪些篇"，顺序由书里的 `book` 结构定。这一点与 v2 相反——v2 说"传进来的顺序就是并表的顺序"，于是篇的先后藏在构建脚本里，第二次调整就没人记得它藏哪了。v3 把它放回源：构建脚本给的是一堆文件，书给的是次序，两者分工明确。
 
@@ -147,6 +156,16 @@ v3 的 `weave` 不再有 `-b`：书的目录是源里的 `book` 结构，跟着 
 	int cmd_tangle(const Options& o) {
 		if (o.files.empty()) throw Error("nw", 0, "tangle 没有输入文件");
 		Document doc = load(o);
+		// 先查后写：有错一个字节都不动。--check 到此为止。
+		Report r = check(doc);
+		for (const string& w : r.warnings) std::cerr << "warn: " << w << "\n";
+		for (const string& e : r.errors) std::cerr << "error: " << e << "\n";
+		if (!r.errors.empty()) return 1;
+		if (o.check_only) {
+			std::cout << "检查通过：chunk " << doc.chunks.size() << " 个，file " << doc.files.size()
+			          << " 个，警告 " << r.warnings.size() << " 条\n";
+			return 0;
+		}
 		int n = tangle(doc, o.outdir, o.debug);
 		std::cout << "写出 " << n << " 个文件\n";
 		return 0;
@@ -183,11 +202,11 @@ v3 的 `weave` 不再有 `-b`：书的目录是源里的 `book` 结构，跟着 
 		if (o.files.size() > 1) throw Error("nw", 0, "serve 只接一个目录");
 		return serve(root, o.port);
 	}
-
-	}  // namespace
 ~@
 
-匿名命名空间的口子在这里关上。下一个函数是 `run`，它要在 `nw.hpp` 里被声明、被 `main` 调用——包在匿名命名空间里就成了内部链接，链接器找不到它。
+**`--check` 不是第二个开关，是第二条出口。** 它和 `tangle` 共用同一段 `check`：查不出来的错，写盘时也不会冒出来；写盘时才冒出来的错，说明判据有两处——那种分叉正是这张表要避免的。`-o` 与 `--check` 同时给时被忽略：干跑不产生位置，指一个目录给它没有意义。
+
+**错误与警告都走 `stderr`，前缀分别是 `error:` 与 `warn:`。** 判定只认 `errors`：警告不改变退出码。这条分工让 `make check` 能"通过，但有话说"——警告照打，构建照过。
 
 打印的是**数量**而不是一份清单：铺盘的结果是一棵树，逐个报路径会把终端刷成一份目录树；而"一个都没写"这种真正需要警觉的情况，数量已经说完了。`weave` 报"页"而不是"文件"：它写的是给人看的页，跟 `tangle` 的产物不是一路货。
 
@@ -198,12 +217,59 @@ v3 的 `weave` 不再有 `-b`：书的目录是源里的 `book` 结构，跟着 
 | 码 | 含义 | 谁该改 |
 |---|---|---|
 | 0 | 成功 | —— |
-| 1 | 源写错了（`parse` / `merge` / `tangle` / `weave` 抛的） | 改 `.nw` |
+| 1 | 源写错了（`check` 报了错，或 `parse` / `merge` / `weave` 抛了） | 改 `.nw` |
 | 2 | 敲错了（子命令、开关、用法） | 改调用的那一行 |
 
 分开的理由是**构建脚本要据此决定怪谁**。混成一个码，调用方只能去正则匹配错误文本，而那串文本是会变的中文。
 
-## 六、run：异常在这里收敛
+## 六、init：唯一不读源的一条
+
+`init` 在 `load` 之前就分派出去了：它要的是一个目录，不是一篇源。它做的也只有两件事——查一遍、写五份。
+
+**先查全，再写第一个字节。** 任何一份已存在就整体失败：初始化只该在空处发生。半途停下比不开始更坏，因为那时目录里有一半是新的、一半是旧的，而"重跑一次"不再是安全动作。
+
+落盘表里每一行是"路径 + 一段字节"，加一份、换一句文案，都只改这张表。模板本身在 `templates.hpp`（上一章第二篇），这里只负责把它们放到哪。
+
+`AGENT.md` 也在表里——它不是文档的附属品，它是这个命令存在的理由：新目录里读 `.nw` 的第一个人常常是 agent，而它只会读这一份。
+
+<< init >>= @
+	// init 的落盘表：加一份、换一句文案，都只改这张表。
+	// 字段有名字而不是用 pair：这张表是给人读的，"哪个是路径"不该靠位置猜。
+	struct Skeleton {
+		const char* path;
+		const char* text;
+	};
+
+	// init：给一个空目录装上能跑的骨架。目录可以还不存在。
+	int cmd_init(const Options& o) {
+		if (o.files.size() > 1) throw Error("nw", 0, "init 只接一个目录");
+		string dir = o.files.empty() ? string(".") : o.files.front();
+		static const Skeleton files[] = {
+		    {"book/main.nw", INIT_MAIN_NW}, {"Makefile", INIT_MAKEFILE},
+		    {"AGENT.md", INIT_AGENT_MD},    {"skills/nw.md", INIT_SKILL_NW},
+		    {".gitignore", INIT_GITIGNORE},
+		};
+		// 不覆盖：初始化只该在空处发生。先查全，再写第一个字节。
+		for (const auto& f : files) {
+			string p = dir + "/" + f.path;
+			if (std::ifstream(p)) throw Error(p, 0, "已存在，不覆盖；换一个目录，或先删掉它");
+		}
+		std::filesystem::create_directories(dir);
+		for (const auto& f : files) {
+			string p = dir + "/" + f.path;
+			write_file(p, f.text);   // write_file 顺手建父目录，skills/ 不必单独 mkdir
+			std::cout << "已生成 " << p << "\n";
+		}
+		std::cout << "接着：cd " << dir << " && make\n";
+		return 0;
+	}
+
+	}  // namespace
+~@
+
+匿名命名空间的口子在这里关上。下一个函数是 `run`，它要在 `nw.hpp` 里被声明、被 `main` 调用——包在匿名命名空间里就成了内部链接，链接器找不到它。
+
+## 七、run：异常在这里收敛
 
 `run` 是唯一一个既碰参数又碰实现的地方，所以它也是唯一一个 `catch` 的地方——往上到 `main` 之间不该再有异常能漏出去。
 
@@ -215,6 +281,8 @@ v3 的 `weave` 不再有 `-b`：书的目录是源里的 `book` 结构，跟着 
 				std::cout << usage();
 				return 0;
 			}
+			// init 不读源：它在 load 之前分派出去。
+			if (o.command == "init") return cmd_init(o);
 			if (o.command == "tangle") return cmd_tangle(o);
 			if (o.command == "weave") return cmd_weave(o);
 			if (o.command == "parse") return cmd_parse(o);
@@ -234,7 +302,7 @@ v3 的 `weave` 不再有 `-b`：书的目录是源里的 `book` 结构，跟着 
 
 `--help` 走 0 而不是 2：它是被要求的，不是敲错的。
 
-## 七、收尾
+## 八、收尾
 
 `run` 吞掉异常之后，`main` 只剩三行——这就是把实现全塞进 `nw` 命名空间的唯一理由。
 
@@ -246,6 +314,6 @@ v3 的 `weave` 不再有 `-b`：书的目录是源里的 `book` 结构，跟着 
 	}
 ~@
 
-`serve` 不走 `tangle` 那条路，所以它也是唯一一条**不使用输入文件列表**的命令。它的参数是一个目录，那就不该叫 `files`；但 `Options` 只有一个位置留给"剩下的词"，多加一个字段等于让同一串词有两个去向。这里的选择是：字段叫 `files`，`serve` 自己知道它指的是目录。
+`serve` 与 `init` 不走 `tangle` 那条路，所以它们**不使用输入文件列表**：一个的参数是目录，另一个也是。那就不该叫 `files`；但 `Options` 只有一个位置留给"剩下的词"，多加一个字段等于让同一串词有两个去向。这里的选择是：字段叫 `files`，`serve` 与 `init` 自己知道它指的是目录。
 
-到这里，入口齐了：四条命令、三个退出码、一个 `catch`。剩下的章讲另外两个出口的实现——`weave` 怎么把同一份源排成一本能读的书，`serve` 怎么把那些页摆出去。
+到这里，入口齐了：五条命令、三个退出码、一个 `catch`。剩下的章讲另外两个出口的实现——`weave` 怎么把同一份源排成一本能读的书，`serve` 怎么把那些页摆出去。

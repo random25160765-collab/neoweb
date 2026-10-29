@@ -424,7 +424,7 @@
 到这一篇为止，weave 的四个部件接齐了，临时豁免取消：
 
 ```
-python3 nw3.py tangle -o /tmp/w5 book/skeleton.nw "book/Chapter 3"/*.nw book/Chapter\ 4/1-cli.nw book/Chapter\ 5/*.nw
+python3 bootstrap.py tangle -o /tmp/w5 book/skeleton.nw "book/Chapter 3"/*.nw book/Chapter\ 4/1-cli.nw book/Chapter\ 5/*.nw
 g++ -std=c++17 -Wall -Wextra -I/tmp/w5 -c /tmp/w5/weave.cpp
 ```
 

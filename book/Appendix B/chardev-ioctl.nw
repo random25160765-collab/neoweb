@@ -1,22 +1,41 @@
-# 一个字符设备驱动 —— 内核的文体
+# 一个字符设备驱动 —— 一次事故复盘
 
-出处：`~/Source/tt-share/tt-kmd/chardev.c`（Tenstorrent 的设备驱动）。
+这是一次事故的复盘。
 
-这一篇**不求可编译**（它需要内核头文件与真实硬件）。选它是因为内核代码有一套自己的文体：`goto` 回滚链、引用计数、`__user` 标注、错误码用负数。这些东西在不熟的人眼里像噪音，在熟的人眼里是**每一条都对应一类真实事故**。
+代码取自真实驱动（`~/Source/tt-share/tt-kmd/chardev.c`，Tenstorrent），**故障场景是构造的教学案例**：把几类真实事故压成一次。这一篇**不求可编译**（需要内核头文件与真实硬件），盘的是"哪条惯例对应哪类事故"。
 
-五块代码各是一个钩子，接进同一个 `chardev.c`。清单在这里的作用是让"这个驱动由哪五个回调组成"一眼可见——内核只调这五个，其余全是它们调出来的。
+## 一、现象
 
-### 一、设备的形状：五个钩子
+某个版本之后，板卡监控读到的信息全是 0：厂商号 0、设备号 0、BAR 大小 0。
 
-用户态看到的 `/dev/tenstorrent/0` 就是一个文件。`open`、`release`、`ioctl`、`mmap` 四个动作绑到四个函数上——**内核只认这五个钩子，不认你的架构**。
+奇怪的地方有三处：设备照常 open，`mmap` 照常工作，`dmesg` 干净得像什么都没发生。用户态也只说"读到 0"，没说"调用失败"。
 
-`.owner` 那一行防的是"模块卸载了但设备还开着"：`THIS_MODULE` 让内核在有人持有文件时不肯卸载。
+## 二、时间线
 
+| 日期 | 动作 | 结果 |
+|---|---|---|
+| 10-12 | 先怀疑权限 | `/dev/tenstorrent/0` 权限正常，读写都通 |
+| 10-12 | 换一台老固件的机器 | 同样全 0——不是硬件 |
+| 10-13 | `strace` 看调用 | `ioctl` 返回 -1，`errno = ENOTTY`；用户态把返回值丢了 |
+| 10-13 | 换回上一个内核模块 | 正常。问题在新代码里 |
+| 10-14 | diff 结构体与命令号 | 结构体加了输入字段 `flags`，宏却从 `_IOR` 改成了 `_IOW`：**方向位写反** |
+| 10-14 | 查用户态库 | 库按 `_IOWR` 的号发送，与驱动 `switch` 里的号对不上，落到 `default` |
+| 10-15 | 修宏 + 修调用方 | 两处都要改：号是双方共同约定，一方改了另一方必须重编 |
+| 10-16 | 加不变量检查 | 见第九节 |
+
+这次事故真正的教训分两层：第五、六行是病根（约定被单方面改了），第三行是**沉默**（错误码没人接，于是"命令不支持"伪装成了"信息是 0"）。前者一眼能查，后者看起来像硬件坏了。
+
+## 三、设备的形状：四个动作，一个属主
+
+用户态看到的 `/dev/tenstorrent/0` 就是一个文件。`open`、`release`、`ioctl`、`mmap` 四个动作绑到四个函数上——**内核只认这几个钩子，不认你的架构**。
+
+`.owner` 那一行防的是"模块卸载了但设备还开着"：`THIS_MODULE` 让内核在有人持有文件时不肯卸载。这条也是事故——漏了它，`rmmod` 之后回调地址指向已释放的内存，那次是一台机器直接 panic。
 
 !! chardev::
 
 file<c> chardev @
 	<< fops >>
+	<< ioctl-cmd >>
 	<< register >>
 	<< open-release >>
 	<< ioctl >>
@@ -33,69 +52,34 @@ file<c> chardev @
 	};
 ~@
 
+清单里第二行就是这次事故的主角：命令号。它在下面单独成块，因为它不属于任何一个函数，而属于**双方的约定**。
 
-### 二、注册：三条资源，一条回滚链
-
-内核里没有异常，只有返回值。所以"申请三样资源"这件事会写成三段 `if (res < 0) goto X`，末尾挂三条标号，按**申请的反序**释放。
-
-这不是老派：内核栈上没有 RAII，也没人愿意在中断上下文里看到析构顺序错乱。
-
-<< register >>= @
-	int init_char_driver(unsigned int max_devices)
-	{
-	    int res = alloc_chrdev_region(&tt_device_id, 0, max_devices, TENSTORRENT);
-	    if (res < 0)
-	        goto alloc_failed;
-
-	    tt_dev_class = class_create(TENSTORRENT);
-	    if (IS_ERR(tt_dev_class)) {
-	        tt_dev_class = NULL;
-	        res = -ENODEV;
-	        goto class_failed;
-	    }
-	    return 0;
-
-	class_failed:
-	    unregister_chrdev_region(tt_device_id, max_devices);
-	alloc_failed:
-	    return res;
-	}
-~@
-
-
-注意 `IS_ERR` 而不是 `< 0`：内核里指针的错误被编进地址的高位，用 `PTR_ERR` / `IS_ERR` 区分，因为指针本身没有负数可用。
-
-### 三、open 与 release：谁在持有设备
-
-`open` 里做的事很少：把设备结构塞进 `file->private_data`，给引用计数加一。`release` 里减一，减到零才真正释放。
-
-计数用 `kref` 而不是 `atomic_t`：它的语义是"最后一个放手的人负责拆房子"，而这正是设备驱动最怕搞错的地方。
-
-<< open-release >>= @
-	static int tt_cdev_open(struct inode *inode, struct file *file)
-	{
-	    struct tt_device *dev = container_of(inode->i_cdev, struct tt_device, cdev);
-	    kref_get(&dev->refcount);
-	    file->private_data = dev;
-	    return 0;
-	}
-
-	static int tt_cdev_release(struct inode *inode, struct file *file)
-	{
-	    struct tt_device *dev = file->private_data;
-	    kref_put(&dev->refcount, tt_device_release);
-	    return 0;
-	}
-~@
-
-
-`container_of` 是内核里最常见的"向下转型"：你手里只有成员的地址，要靠它在结构体里的偏移倒推出外层对象。C 没有继承，这是唯一的办法。
-
-### 四、ioctl：号码里编着方向与大小
+## 四、命令号：方向位写在宏里
 
 `_IOWR(TENSTORRENT, 0x01, struct tt_ioctl_arg)` 不是随机数：它把**方向**（读/写/双向）、**类型**、**序号**、**参数大小**编进一个 32 位数。内核只靠这个数就能判断"用户传的缓冲区够不够大"。
 
+方向必须与结构体的实际用法一致：结构里有输入字段（`flags`），也有输出字段（`vendor_id` 等），所以是 `_IOWR`。只写 `_IOW` 是一个**类型正确的谎**——编译器不会拦，因为宏照样生成一个整数。
+
+<< ioctl-cmd >>= @
+	// 方向位是约定的一部分：结构里既有输入（flags）也有输出（vendor_id…），
+	// 所以是 _IOWR。改成 _IOW 不会编译失败，只会让双方的号对不上。
+	#define TT_IOCTL_GET_INFO  _IOWR(TENSTORRENT, 0x01, struct tt_ioctl_arg)
+
+	struct tt_ioctl_arg {
+	    __u32 flags;        // 输入：要哪些字段
+	    __u32 vendor_id;    // 输出
+	    __u32 device_id;    // 输出
+	    __u64 bar_size;     // 输出
+	};
+~@
+
+号变了，用户态就得重编。**这条约定没有任何运行期校验**：内核只比对整数，对不上就返回 `-ENOTTY`。所以它属于"必须写下来，否则下一个改结构的人一定漏"的那类东西。
+
+## 五、ioctl：拷贝与返回码
+
 `copy_from_user` 不能换成 `memcpy`：用户态地址可能根本没映射，`memcpy` 会直接把内核打崩；`copy_from_user` 会返回"拷了几个字节没成功"，让调用方有机会拒绝。
+
+`switch` 的 `default` 返回 `-ENOTTY` 而不是 `-1`：用户态靠错误码区分"命令不支持"和"参数错"。这次事故里，正是这两个语义被调用方一起丢了。
 
 << ioctl >>= @
 	static long tt_cdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -121,10 +105,64 @@ file<c> chardev @
 	}
 ~@
 
-
 `__user` 这个标注不产生代码，它只给静态检查器看：**凡是标了 `__user` 的指针，都不许直接解引用**。把约定写成类型，机器替你守。
 
-### 五、mmap：把设备的地址空间借给用户态
+## 六、注册：三条资源，一条回滚链
+
+内核里没有异常，只有返回值。所以"申请三样资源"会写成三段 `if (res < 0) goto X`，末尾挂三条标号，按**申请的反序**释放。
+
+这不是老派：内核栈上没有 RAII，也没人愿意在中断上下文里看到析构顺序错乱。
+
+<< register >>= @
+	int init_char_driver(unsigned int max_devices)
+	{
+	    int res = alloc_chrdev_region(&tt_device_id, 0, max_devices, TENSTORRENT);
+	    if (res < 0)
+	        goto alloc_failed;
+
+	    tt_dev_class = class_create(TENSTORRENT);
+	    if (IS_ERR(tt_dev_class)) {
+	        tt_dev_class = NULL;
+	        res = -ENODEV;
+	        goto class_failed;
+	    }
+	    return 0;
+
+	class_failed:
+	    unregister_chrdev_region(tt_device_id, max_devices);
+	alloc_failed:
+	    return res;
+	}
+~@
+
+注意 `IS_ERR` 而不是 `< 0`：内核里指针的错误被编进地址的高位，用 `PTR_ERR` / `IS_ERR` 区分，因为指针本身没有负数可用。
+
+## 七、open 与 release：谁在持有设备
+
+`open` 里做的事很少：把设备结构塞进 `file->private_data`，给引用计数加一。`release` 里减一，减到零才真正释放。
+
+计数用 `kref` 而不是 `atomic_t`：它的语义是"最后一个放手的人负责拆房子"，而这正是设备驱动最怕搞错的地方。
+
+<< open-release >>= @
+	static int tt_cdev_open(struct inode *inode, struct file *file)
+	{
+	    struct tt_device *dev = container_of(inode->i_cdev, struct tt_device, cdev);
+	    kref_get(&dev->refcount);
+	    file->private_data = dev;
+	    return 0;
+	}
+
+	static int tt_cdev_release(struct inode *inode, struct file *file)
+	{
+	    struct tt_device *dev = file->private_data;
+	    kref_put(&dev->refcount, tt_device_release);
+	    return 0;
+	}
+~@
+
+`container_of` 是内核里最常见的"向下转型"：你手里只有成员的地址，要靠它在结构体里的偏移倒推出外层对象。C 没有继承，这是唯一的办法。
+
+## 八、mmap：把设备的地址空间借给用户态
 
 `mmap` 是这类驱动最主要的通路：几十 MB 的环形队列不走 `read`/`write`，直接映射进用户态，双方靠内存次序通信。
 
@@ -146,20 +184,27 @@ file<c> chardev @
 	}
 ~@
 
+## 九、修复与不变量
 
-### 六、这一篇想说明什么
+修的是两处：宏改回 `_IOWR`，调用方不再丢掉返回值。加的是下面这张表——每一条都对应一次事故或一次险情：
 
-内核代码的每一行几乎都能回答"不加这一句会出什么事"：
+| 不变量 | 谁破坏它 | 症状 |
+|---|---|---|
+| 命令号的读写方向与结构体一致 | 给结构加输入字段却忘了改宏 | 号对不上，`-ENOTTY`；调用方不检查就成了"读到 0" |
+| 用户态的每次 ioctl 都检查返回值 | 顺手写成 `ioctl(...)` 丢掉结果 | 错误伪装成数据，排查方向全错 |
+| 申请的每个资源都有回滚标号 | 新加一步忘了挂链 | 第二次 `insmod` 直接失败 |
+| 引用计数减到零才释放 | 图快直接 `kfree` | 设备还在用，野指针 |
+| 用户态指针只经 `copy_*_user` | 用 `memcpy` 省一次检查 | 用户传坏地址，内核崩 |
+| 不认识的命令返回 `-ENOTTY` | 返回 `-1` | 用户态分不清"不支持"与"参数错" |
 
-| 写法 | 不加的后果 |
-|---|---|
-| `goto` 回滚链 | 申请失败时漏放资源，第二次 `insmod` 直接失败 |
-| `kref` | 设备还在用就被卸载，野指针 |
-| `copy_from_user` | 用户态传个坏地址，内核崩 |
-| `__user` | 有人图省事直接解引用，编译期没人拦 |
-| `-ENOTTY` 而不是 `-1` | 用户态分不清"命令不支持"和"参数错" |
+## 十、复盘体的用处
+
+代码部分的每一行几乎都能回答"不加这一句会出什么事"——这就是复盘体与说明文体的分工：说明文体按结构讲，复盘按后果讲。
+
+它的长处是把**后果**和**写法**钉在一起：读到 `IS_ERR` 时你知道不用它会发生什么，而不只是"内核习惯这么写"。
+
+它的短处同样明显：只能讲发生过的事。表里没有的那条不变量，得靠审读去补——下一次事故不会挑你写过的那条。
 
 文学化编程在这里的价值不是"解释语法"，而是**把事故写成注释的位置**：每一段散文都对着一条"不加会怎样"。这种代码，注释不是装饰，是维修手册。
 
 ~::
-

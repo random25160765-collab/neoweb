@@ -423,8 +423,8 @@ cmark 给出的是一棵节点树。我们不做自己的 AST，直接把树走�
 所以这一篇的验收只到编译这一层：
 
 ```
-python3 nw3.py check book/skeleton.nw book/Chapter\ 5/1-markdown.nw
-python3 nw3.py tangle -o /tmp/w5 book/skeleton.nw book/Chapter\ 5/1-markdown.nw
+python3 bootstrap.py check book/skeleton.nw book/Chapter\ 5/1-markdown.nw
+python3 bootstrap.py tangle -o /tmp/w5 book/skeleton.nw book/Chapter\ 5/1-markdown.nw
 g++ -std=c++17 -Wall -Wextra -Wno-unused-function -I/tmp/w5 -c /tmp/w5/weave.cpp
 ```
 

@@ -32,7 +32,7 @@ Makefile: ;
 SRC := $(shell find book -name '*.nw' | sort | sed 's/ /\\ /g')
 
 %: FORCE
-	@test -f tangle/Makefile || $(PYTHON) nw3.py tangle -o tangle $(SRC)
+	@test -f tangle/Makefile || $(PYTHON) bootstrap.py tangle -o tangle $(SRC)
 	@$(MAKE) --no-print-directory -f tangle/Makefile $@
 ```
 
@@ -48,11 +48,13 @@ SRC := $(shell find book -name '*.nw' | sort | sed 's/ /\\ /g')
 
 **产物里没有一行注释提醒"这是生成的"。** 那种注释会跟着产物跑到别人的机器上（装好的二进制、发出去的包），而它想说的两件事——"真相在别处"、"别手改"——都是这本书要读者从结构里读出来的，不是靠一句标语。
 
-## 三、破点：一个只做 tangle 的 Python 实现
+## 三、破点：一个 Python 写的对照物
 
-`nw3.py` 是这本书的第二个实现，只做 `tangle`：读 `.nw`、并表、铺盘。它不 weave、不 serve，也不打算长成第二个完整的工具。
+`bootstrap.py` 是这本书的第二个实现：读 `.nw`、并表、查引用、铺盘。它不 weave、不 serve，也不打算长成第二个完整的工具。
 
-它存在的理由只有一个：**第一次**。当 `tangle/` 还是空的时候，得有个东西能读 `.nw`。之后它就是 `make check` 与 `crosscheck` 的裁判。
+它存在的理由有两个，都不在平时：**第一次**（当 `tangle/` 还是空的时候，得有个东西能读 `.nw`），以及 **`crosscheck`**（两个实现对同一份源给出同一棵树，才叫定点）。
+
+`make check` 不归它了。判定归二进制——`nw tangle --check` 与 `nw tangle` 共用同一段检查代码，"查得过的源铺得出东西"因此只有一处判据。破点留着自己那份 `check`，用途反过来：它是 `nw` 的对照物，两份结论对不上时，说明其中一处的判据漂了。
 
 这条边界必须守住，否则会滑成"两个实现各发展一半"：破点每多一个功能，`crosscheck` 能发现的偏差就少一处。
 
@@ -81,11 +83,11 @@ make crosscheck
 
 排除名单会长，这不是漏洞而是判据在起作用：每多一条，都对应一件 tangle 不负责的事。反过来说，`tangle/` 里只要出现一条绕过 tangle 生成的文件，这条命令就该知道。
 
-这防的不是"自举失败"——自举失败会当场报错。它防的是**破点悄悄僵化**：语法的某一处改了，`nw` 改了，`nw3.py` 忘了。那时 `make` 依然能过（因为用的是 `nw`），只有下一次从零开始的人会撞上。这种事在自举系统里几乎必然发生一次，所以它得有一条命令守着。
+这防的不是"自举失败"——自举失败会当场报错。它防的是**破点悄悄僵化**：语法的某一处改了，`nw` 改了，`bootstrap.py` 忘了。那时 `make` 依然能过（因为用的是 `nw`），只有下一次从零开始的人会撞上。这种事在自举系统里几乎必然发生一次，所以它得有一条命令守着。
 
 `crosscheck` 通过的那一刻叫**定点**：两个实现对同一份源给出同一棵树。定点不是永久状态，改一次语法就要重新打一次。
 
-**`check` 与 `test` 分工不同。** `make check` 读的是书：重复实现、未实现的引用、挂载冲突、书与部对不上——错在源里。`make test` 读的是破点：四十六个小用例，喂给它的都是构造出来的 `.nw` 片段，不碰这本书；每份片段另配一本书收它，所以顺序规则也在用例里。前者保证这一版的书自洽，后者保证换台机器时那个 Python 实现还认得出同一套语法。两条都不编译——编译是 `make`。
+**`check` 与 `test` 分工不同。** `make check` 读的是书，跑的是 `nw tangle --check`：重复实现、未实现的引用、挂载冲突、书与部对不上——错在源里，而且一个字节都不写。`make test` 读的是破点：四十六个小用例，喂给它的都是构造出来的 `.nw` 片段，不碰这本书；每份片段另配一本书收它，所以顺序规则也在用例里。前者保证这一版的书自洽，后者保证换台机器时那个 Python 实现还认得出同一套语法。
 
 ## 六、篇的路径里有空格
 
@@ -103,7 +105,7 @@ make crosscheck
 	SRC      := $(shell find book -name '*.nw' | sort | sed 's/ /\\ /g')
 	# 二进制是 tangle 产物的下游，跟着产物一起放在 tangle/ 下。
 	NW       := tangle/build/nw
-	BOOT     := python3 nw3.py
+	BOOT     := python3 bootstrap.py
 	# 端口是这台机器的状态，不是这本书的属性：8080 被别的服务占着是常态，
 	# 所以做成可覆盖的，而不是改一行再改回来。
 	PORT     ?= 8080
@@ -123,24 +125,24 @@ make crosscheck
 	all: $(NW)
 
 	# 有 nw 就用 nw（自举），没有才退回破点。一次铺整棵树，用一个记号记下。
-	.tangle-stamp: $(SRC) nw3.py
+	.tangle-stamp: $(SRC) bootstrap.py
 		@mkdir -p tangle/build
 		@if [ -x $(NW) ]; then \
 		  echo "  NW    tangle"; $(NW) tangle -o tangle $(SRC); \
 		else \
-		  echo "  BOOT  nw3.py"; $(BOOT) tangle -o tangle $(SRC); \
+		  echo "  BOOT  bootstrap.py"; $(BOOT) tangle -o tangle $(SRC); \
 		fi
 		@touch $@
 
 	$(NW): .tangle-stamp
 		$(CXX) $(CXXFLAGS) -o $@ tangle/*.cpp $(LIBS)
 
-	# 破点也会查：它比 nw 多一条 check，理由在下一篇。
-	check:
-		$(BOOT) check $(SRC)
+	# 判定归二进制：--check 只读源、不写盘。依赖 $(NW)，免得拿旧二进制查新源。
+	check: $(NW)
+		@$(NW) tangle --check $(SRC)
 
 	test:
-		python3 test_nw3.py
+		python3 test_bootstrap.py
 
 	web: $(NW)
 		@$(NW) weave -o weave $(SRC)
@@ -257,7 +259,7 @@ make crosscheck # 两个实现是否还一致
 想单独跑一次破点也可以，但要记得把布局指对：
 
 ```
-find book -name '*.nw' -exec python3 nw3.py tangle -o tangle {} +
+find book -name '*.nw' -exec python3 bootstrap.py tangle -o tangle {} +
 ```
 
 不能写成 `$(find book -name '*.nw')`：命令替换的结果会被 shell 按空格切开，而本书的路径里就有空格（`book/Chapter 1/…`），切开之后破点收到的是半条路径。`-exec … {} +` 让 `find` 自己把文件交出去，不经过 shell 的分词；`-print0 | xargs -0` 也行，但多一节管道，还多一个"这台机器有没有 `xargs`"的假设。

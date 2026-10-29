@@ -2,24 +2,27 @@
 
 这一篇产 `tangle/tangle.cpp`：把「一张表 + 一棵树」铺成磁盘上的文件。
 
-综合只有三步：**查**（这个名字指哪一块）、**贴**（把那一块展开成行）、**铺**（按树写盘）。没有单独的"检查"阶段——错了当场报，报的时候带上写错的那一行。
+综合四件事：**查**（这个名字指哪一块）、**核**（这些引用有没有问题）、**贴**（把那一块展开成行）、**铺**（按树写盘）。前两件只读源，后两件只碰磁盘——这条界线就是 `nw tangle --check` 的全部理由。
 
 ## 一、接线
 
 file<cpp> tangle @
 	<< tangle 的头 >>
 	<< 解析名字 >>
+	<< 检查 >>
 	<< 展开 >>
 	<< 一个文件 >>
 	<< 铺盘 >>
 	<< tangle 的尾 >>
 ~@
 
-顺序仍是编译顺序：先有名字解析，才有展开；先能展开成一个文件，才谈得上铺一棵树。
+顺序仍是编译顺序：先有名字解析，才查得动引用；先查清楚，才有资格展开；先能展开成一个文件，才谈得上铺一棵树。
 
 ## 二、头
 
-`resolve`、`file_text`、`tangle` 三个是公开的（`nw.hpp` 里有声明），其余都在匿名命名空间里。
+`resolve`、`file_text`、`tangle`、`check` 四个是公开的（`nw.hpp` 里有声明），其余都在匿名命名空间里。
+
+`check` 与 `tangle` 分家而不是合成一个函数，理由是它们对磁盘的承诺相反：一个保证"一个字节都不写"，一个保证"写完就是全部"。把两件事塞进一个函数，两种保证都会变模糊——而 `--check` 要靠第一种保证才敢在 CI 里跑。
 
 << tangle 的头 >>= @
 	#include "nw.hpp"
@@ -52,9 +55,183 @@ v3 取消回退：**含 `::` 的是全名，直接查；不含的拼上"写这�
 
 `file` 与 `at_line` 是调用方给的，不是名字自己带的。名字只是字符串，它不知道自己写在哪一行——这件事只有记着那一行的人清楚。
 
-## 四、贴：引用是复制
+## 四、核：先查完，再动手
 
-`expand` 是全篇唯一递归的地方。
+写盘写到第三篇才发现引用错了，磁盘上就留下半棵树——它比什么都没写更糟，因为看起来成功了。所以检查是**独立的一趟**，跑在第一个字节之前。
+
+这一趟不能复用 `expand`。`expand` 的产物是文本，它按路径复制：一块被两条路径引到就展开两遍，diamond 上就是指数。检查要的恰好相反——**每条边看一次就够**。所以这里自己走一趟下标 DFS：帧里只有一个块下标和一个行下标，两张位图分别记"我正在谁里面"（`active`）与"谁已经走完"（`done`）。环报在**当前这条边**上，位置是引用那一行，不是块的声明行——报错要指向改得动的那一处。
+
+收集而不抛，是这个函数唯一的风格选择：
+
+- 一处错误抛一次，用户就得改一处、跑一次；
+- 检查便宜，正因为它什么都不做——多查几处的成本几乎为零。
+
+五段，按依赖顺序：
+
+1. **top**：没有 `dir top @` 就没有根，后面全是空谈；
+2. **挂载**：同一个 dir/file 挂两次是错误（声明位置唯一）；定义了却没人挂是警告——它不阻塞构建，但产物里会安静地少一个文件；
+3. **命名空间**：`!! x::` 与 `<< x >>` 撞名时，读者没法从名字判断说的是哪一个；
+4. **实例**：未定义、环，以及每个块被引了几次（零次就是"不可达"）；
+5. **路径**：两个挂载落到同一个物理路径。`util<cpp>` 与 `util<hpp>` 不算冲突，后缀不同。
+
+第五段走的是 `walk` 的干跑分支：同一棵树、同一份 `seen`，只是不建目录、不写文件。检查与铺盘看到的是同一棵树，才不会出现"检查过了、铺的时候又冲突"。
+
+`walk` 的实现在下一节的铺盘里，这里先声明它。这条声明不能靠移动清单消掉：`walk` 依赖 `file_text`，`file_text` 依赖 `expand`，而检查又要用 `walk`——真按依赖排序，这一篇得从头讲起。互相依赖的函数是前置声明的正当理由，也是唯一一个。
+
+<< 检查 >>= @
+	namespace {
+
+	// 铺盘那一段的实现（下一节定义）。检查借它的干跑分支走一遍路径唯一。
+	// 错误按 Error 收：检查要拼成一行字，铺盘要原样抛给调用方。
+	void walk(const Document& doc, const string& root, const string& prefix, const DirNode& d,
+	          bool line_mode, bool dry, set<string>& seen, int& written, vector<Error>& errors);
+
+	// 实例计数与环：一趟下标 DFS，每个块只展开一次。
+	// 不调用 expand：它按路径复制文本，diamond 上是指数；检查要的是每条边看一次。
+	void walk_chunks(const Document& doc, vector<int>& mounted, vector<string>& errors) {
+		const size_t n = doc.chunks.size();
+		mounted.assign(n, 0);
+		set<string> reported;        // 未定义按消息去重：同一个错名写十遍只报一次
+
+		// 接线上的实例也是实例点：file 体里那一串引用决定了哪些块"被用到"。
+		for (const auto& kv : doc.files)
+			for (const Inst& in : kv.second.body) {
+				size_t t;
+				try {
+					t = resolve(doc, in.name, in.ns, in.file, in.line);
+				} catch (Error& e) {
+					if (reported.insert(e.where()).second) errors.push_back(e.where());
+					continue;
+				}
+				++mounted[t];
+			}
+
+		vector<char> done(n, 0);
+		vector<char> active(n, 0);   // 祖先链：进入置位、退出清零；一趟走完自然全零，可复用
+		struct Frame {
+			size_t idx;      // 块下标
+			size_t next;     // 下一条要看的 line
+		};
+		for (size_t root = 0; root < n; ++root) {
+			if (done[root]) continue;
+			active[root] = 1;
+			vector<Frame> stack;
+			stack.push_back({root, 0});
+			while (!stack.empty()) {
+				Frame& f = stack.back();
+				const Chunk& c = doc.chunks[f.idx];
+				if (f.next >= c.lines.size()) {
+					active[f.idx] = 0;
+					done[f.idx] = 1;
+					stack.pop_back();
+					continue;
+				}
+				const Line& ln = c.lines[f.next++];
+				if (ln.kind != Line::Inst) continue;
+				size_t t;
+				try {
+					t = resolve(doc, ln.name, ln.ns, c.src_file, ln.no);
+				} catch (Error& e) {
+					if (reported.insert(e.where()).second) errors.push_back(e.where());
+					continue;
+				}
+				++mounted[t];    // 按实例点计：同一点只加一次
+				if (active[t]) {
+					errors.push_back(
+					    Error(c.src_file, ln.no, "chunk 循环实例化：" + doc.chunks[t].name).where());
+					continue;
+				}
+				// 待办块没有下游；走过的块不必再走（记忆化就是 DAG 上不爆炸的那一半）。
+				if (doc.chunks[t].todo || done[t]) continue;
+				active[t] = 1;
+				stack.push_back({t, 0});
+			}
+		}
+	}
+
+	}  // namespace
+
+	// 检查：只读 Document，不建目录、不写一个字节。
+	Report check(const Document& doc) {
+		Report r;
+
+		// ① top：没有它就没有根。
+		auto top = doc.dirs.find("top");
+		if (top == doc.dirs.end())
+			r.errors.push_back(
+			    Error(doc.main_file, 0, "缺少 dir top @（tangle 的根只能由 @ 建立）").where());
+		else if (!top->second.declared)
+			r.errors.push_back(
+			    Error(doc.main_file, 0, "top 必须先 dir top @（tangle 的根只能由 @ 建立）").where());
+
+		// ② 挂载：挂两次是错误，定义了没挂是警告。top 是根，不参与"未挂载"。
+		map<string, int> dir_hits;
+		map<string, int> file_hits;
+		for (const auto& kv : doc.dirs)
+			for (const Mount& mt : kv.second.mounts) {
+				if (mt.is_dir)
+					++dir_hits[mt.name];
+				else
+					++file_hits[file_key(mt.name, mt.type)];
+			}
+		for (const auto& kv : doc.dirs) {
+			if (kv.first == "top") continue;
+			int n = dir_hits.count(kv.first) ? dir_hits[kv.first] : 0;
+			if (n > 1)
+				r.errors.push_back(Error(doc.main_file, 0,
+				                         "dir " + kv.first + " 挂载了 " + std::to_string(n) +
+				                             " 次（声明位置唯一）")
+				                        .where());
+			else if (n == 0 && kv.second.touched)
+				r.warnings.push_back(Error(doc.main_file, 0, "dir " + kv.first + " 已定义但未挂载").where());
+		}
+		for (const auto& kv : doc.files) {
+			string label =
+			    kv.second.name + "<" + (kv.second.type.empty() ? string("无类型") : kv.second.type) + ">";
+			int n = file_hits.count(kv.first) ? file_hits[kv.first] : 0;
+			if (n > 1)
+				r.errors.push_back(Error(doc.main_file, 0,
+				                         "file " + label + " 挂载了 " + std::to_string(n) + " 次")
+				                        .where());
+			else if (n == 0 && kv.second.touched)
+				r.warnings.push_back(Error(doc.main_file, 0, "file " + label + " 已定义但未挂载").where());
+		}
+
+		// ③ 命名空间与 chunk 撞名：读的人没法从名字判断说的是哪一个。
+		for (const string& ns : doc.namespaces)
+			if (doc.index.count(ns))
+				r.errors.push_back(Error(doc.main_file, 0, "命名空间 " + ns + " 与同名 chunk 冲突").where());
+
+		// ④ 实例：未定义、环，以及每个块被引了几次（零次就是不可达）。
+		vector<int> mounted;
+		walk_chunks(doc, mounted, r.errors);
+		for (size_t i = 0; i < doc.chunks.size(); ++i)
+			if (mounted[i] == 0)
+				r.warnings.push_back(Error(doc.chunks[i].src_file, doc.chunks[i].line,
+				                           "chunk " + doc.chunks[i].name + " 不可达（实现了但没有实例化）")
+				                          .where());
+
+		// ⑤ 路径：走同一棵树，只是不落盘。
+		if (top != doc.dirs.end() && top->second.declared) {
+			set<string> seen;
+			int written = 0;
+			vector<Error> errs;
+			walk(doc, "", "", top->second, false, true, seen, written, errs);
+			for (const Error& e : errs) r.errors.push_back(e.where());
+		}
+		return r;
+	}
+~@
+
+## 五、贴：引用是复制
+
+`expand` 不用递归。两条理由，都不是"递归不好看"。
+
+**深度由源决定，不由代码决定。** 展开的层数等于引用链的层数：有人写一条两千层的链，递归版就在那条链上撞栈的上限——源是合法的，工具崩了；而调大栈上限只是把崩点往后挪。显式栈把深度从调用栈搬到堆上，两千层与二十层没有区别。
+
+**每层返回会把整棵子树搬一遍。** 若 `expand` 返回一个向量，父层要把它拼进自己的结果，链式展开就是 $O(n^2)$ 次拷贝；直接把行追加进同一个 `out`，每条输出行只写一次。
+
+（全篇还剩一处递归：`walk` 铺目录。它的深度是目录层数，不是引用图——两件事不要混为一谈。）
 
 把一块展开后的行数记作 $L(c)$：它体里有 $m$ 行普通行，引用了 $k$ 个块 $c_1,\dots,c_k$。
 
@@ -62,9 +239,9 @@ $$
 L(c) = m + \sum_{i=1}^{k} L(c_i)
 $$
 
-这个式子说的是"引用是复制，不是指针"——被引用几次就展开几次。它也是环检测存在的理由：引用图里一旦有环，这个递归没有底，$L(c)$ 根本解不出来。
+这个式子说的是"引用是复制，不是指针"——被引用几次就展开几次。它也是环检测存在的理由：引用图里一旦有环，这个展开没有底，$L(c)$ 根本解不出来。
 
-所以 `stack` 记的是**祖先链**：从最外层到当前这层，路过哪些块。不用"访问过的集合"，因为同一块被两处引用是合法复用。集合会把第二次引用误判成环；链只记"我正在谁里面"，那才是环。
+所以 `active` 记的是**祖先链**：进入一块置位、退出清零。不用"访问过的集合"，因为同一块被两处引用是合法复用。集合会把第二次引用误判成环；`active` 只记"我正在谁里面"，那才是环。
 
 << 展开 >>= @
 	namespace {
@@ -76,43 +253,63 @@ $$
 		int no = 0;
 	};
 
-	// 把一块展开成行：实例就递归（缩进叠加），普通行加上缩进原样贴。
-	// stack 是祖先链，不是"访问过的集合"：同一块被两处引用是合法复用。
-	void expand(const Document& doc, size_t idx, const string& indent, const string& file,
-	            int at_line, vector<Out>& out, vector<size_t>& stack) {
-		const Chunk& c = doc.chunks[idx];
-		for (size_t s : stack)
-			if (s == idx) throw Error(file, at_line, "chunk 循环实例化：" + c.name);
-		if (c.todo) return;   // 还没写完：展开成空，不把半截代码贴进产物
-		stack.push_back(idx);
-		for (const Line& ln : c.lines) {
-			if (ln.kind == Line::Inst) {
-				size_t t = resolve(doc, ln.name, ln.ns, c.src_file, ln.no);
-				expand(doc, t, indent + ln.indent, c.src_file, ln.no, out, stack);
+	// 展开时的一帧：展开哪一块、这一块的下一条 line、这一层的缩进。
+	// 缩进存在帧里，因为它由进入的路径决定；退出时整帧丢掉，不必"恢复上一层"。
+	struct Frame {
+		size_t idx;      // 块下标
+		size_t next;     // 下一条要处理的 line
+		string indent;   // 这一层的缩进
+	};
+
+	// 把一块展开成行：显式栈（缩进叠加），普通行加上缩进原样贴。
+	// active 是祖先链，不是"访问过的集合"：同一块被两处引用是合法复用。
+	void expand(const Document& doc, size_t root, const string& indent, vector<Out>& out) {
+		if (doc.chunks[root].todo) return;   // 还没写完：展开成空，不把半截代码贴进产物
+		vector<char> active(doc.chunks.size(), 0);   // 按块下标置位：进入 1，退出 0
+		vector<Frame> stack;
+		active[root] = 1;
+		stack.push_back({root, 0, indent});
+		while (!stack.empty()) {
+			Frame& f = stack.back();
+			const Chunk& c = doc.chunks[f.idx];
+			if (f.next >= c.lines.size()) {
+				active[f.idx] = 0;
+				stack.pop_back();
 				continue;
 			}
-			// 空行不加缩进：加了就变成"看着空、其实有空白"的行，diff 会打架。
-			out.push_back({ln.text.empty() ? string() : indent + ln.text, c.src_file, ln.no});
+			const Line& ln = c.lines[f.next++];
+			if (ln.kind != Line::Inst) {
+				// 空行不加缩进：加了就变成"看着空、其实有空白"的行，diff 会打架。
+				out.push_back({ln.text.empty() ? string() : f.indent + ln.text, c.src_file, ln.no});
+				continue;
+			}
+			size_t t = resolve(doc, ln.name, ln.ns, c.src_file, ln.no);
+			if (active[t])
+				throw Error(c.src_file, ln.no, "chunk 循环实例化：" + doc.chunks[t].name);
+			if (doc.chunks[t].todo) continue;
+			string ind = f.indent + ln.indent;   // 先算：后面的 push_back 会让 f 失效
+			active[t] = 1;
+			stack.push_back({t, 0, std::move(ind)});
 		}
-		stack.pop_back();
 	}
 
 	}  // namespace
 ~@
 
-三处讲究：
+四处讲究：
 
 - **空行留空**，不叠缩进。否则产物里到处是"看着空、其实有空白"的行，某些编辑器会自动裁掉，本地 diff 与 CI 的 diff 就对不上了。
 - **缩进是叠加的**（`indent + ln.indent`）。剥缩进时已经把每块自己那层排版缩进去掉了，剩下的是作者表达的层次，叠加才对。
 - **待办块展开成空**。`@todo` 的用途是先写下结构、把没写完的地方标出来；把半截代码贴进产物，只是把错误往后推。
+- **帧的引用不能跨 `push_back`**。`vector` 扩容会把帧搬到新内存，`Frame&` 随之悬空；所以缩进串先算好、再压栈，压完立刻重新取一次 `back()`。
 
-## 五、一个文件
+## 六、一个文件
 
 一个文件的内容 = 接线上的实例依次展开。这句话里藏着两个决定。
 
 **实例之间空一行。** 每块体首尾的空行在剥缩进时已经去掉了（那一篇的规矩），所以块与块之间的分隔只能在这里给。散文里的分隔不该只存在于阅读版，产物也要能读。
 
-**空展开不占行。** 待办块、空块展开出来是零行；若先往结果里塞一个空行再展开，产物里就会多出一个孤零零的空行，看着像"这里本来有内容"。所以先展开到临时向量，非空才追加。
+**空展开不占行。** 待办块、空块展开出来是零行；若先往结果里塞一个空行再展开，产物里就会多出一个孤零零的空行，看着像"这里本来有内容"。所以先展开到临时向量，非空才追加——追加用移动，不拷贝整棵子树。
 
 << 一个文件 >>= @
 	namespace {
@@ -127,14 +324,14 @@ $$
 	// 一个文件的内容 = 接线上的实例依次展开。
 	string file_text(const Document& doc, const FileNode& f, bool line_mode) {
 		vector<Out> out;
-		vector<size_t> stack;
 		for (const Inst& in : f.body) {
 			vector<Out> part;
-			expand(doc, resolve(doc, in.name, in.ns, in.file, in.line), "", in.file, in.line, part,
-			       stack);
+			expand(doc, resolve(doc, in.name, in.ns, in.file, in.line), "", part);
 			if (part.empty()) continue;               // 待办块、空块：不产出，也不留一个孤零零的空行
 			if (!out.empty()) out.push_back(Out{});   // 实例之间空一行
-			out.insert(out.end(), part.begin(), part.end());
+			// 追加用移动：Out 里是两条 string，深拷贝一份等于白搬一次。
+			out.reserve(out.size() + part.size());
+			for (Out& o : part) out.push_back(std::move(o));
 		}
 
 		// 行号：断了才插一条。每行一条 #line，产物就没法读了。
@@ -160,40 +357,44 @@ $$
 
 只在 C/C++ 上开：`#line` 是预处理指令，写进 `Makefile` 或 YAML 就是语法错。判断按**文件类型**走，不按后缀猜——类型是作者声明的，后缀是拼出来的。
 
-## 六、铺盘
+## 七、铺盘
 
 树是从 `top` 往上长出来的，所以铺盘就是一次深度优先：dir 建目录，file 写内容。
 
-两个检查顺手就做了，不需要单独一趟：
+到了这一步，该报的错都在检查里报完了，所以 `walk` 不再抛：两个挂载落到同一个物理路径时，它记一条错误、跳过那一支——同一个前缀下的每一条都会被同一个冲突染上，重复报只是噪音。这条错误平时流不到用户面前，因为命令行先跑 `check`；留它是因为 `tangle` 是公开接口，直接调用的人不该看到一个静默的半棵树。
 
-- **路径唯一**。把走过的逻辑路径放进 `seen`；同一个路径被挂载两次就报错（同目录下不能有两个同名文件）。文件要按**加上后缀之后**的名字比：`util<cpp>` 与 `util<hpp>` 落成 `util.cpp` 与 `util.hpp`，不冲突。
-- **缺 `top`**。它不是一个普通目录，是"从这里开始铺"。没有它，铺出去的东西没有根。
+`dry` 那一位是给检查用的：同一棵树、同一份 `seen`，只是不建目录、不写文件。路径唯一因此只有一处判据——检查与铺盘不可能各判一套。文件按**加上后缀之后**的名字比：`util<cpp>` 与 `util<hpp>` 落成 `util.cpp` 与 `util.hpp`，不冲突。
 
-还有一条不是检查，是取舍：**挂载了但没写内容的 file 不落盘**。骨架先行的写法就是先挂上去、晚点再填，这中间不该产出空文件——空文件比没有文件更难查，编译能过，行为是空的。
+一条不是检查，是取舍：**挂载了但没写内容的 file 不落盘**。骨架先行的写法就是先挂上去、晚点再填，这中间不该产出空文件——空文件比没有文件更难查，编译能过，行为是空的。
 
 << 铺盘 >>= @
 	namespace {
 
-	// 从 top 走树：dir 建目录，file 写内容。
+	// 从 top 走树：dir 建目录，file 写内容。dry 为真时只走不落盘（检查用）。
 	void walk(const Document& doc, const string& root, const string& prefix, const DirNode& d,
-	          bool line_mode, set<string>& seen, int& written) {
+	          bool line_mode, bool dry, set<string>& seen, int& written, vector<Error>& errors) {
 		for (const Mount& mt : d.mounts) {
 			string parent = prefix.empty() ? string() : prefix + "/";
 			if (mt.is_dir) {
 				string dir = parent + mt.name;
-				if (!seen.insert(dir).second)
-					throw Error(mt.file, mt.line, "物理路径冲突：" + dir + " 挂载了不止一次");
-				std::filesystem::create_directories(root + "/" + dir);
+				if (!seen.insert(dir).second) {
+					errors.push_back(Error(mt.file, mt.line, "物理路径冲突：" + dir + " 挂载了不止一次"));
+					continue;   // 这一支不再往下：下面的每一条都会被同一个前缀染上
+				}
+				if (!dry) std::filesystem::create_directories(root + "/" + dir);
 				auto it = doc.dirs.find(mt.name);
 				// 挂载了但还没定义：目录照建，里面什么都没有。
 				if (it != doc.dirs.end())
-					walk(doc, root, dir, it->second, line_mode, seen, written);
+					walk(doc, root, dir, it->second, line_mode, dry, seen, written, errors);
 				continue;
 			}
 			string base = mt.type.empty() ? mt.name : mt.name + suffix_of(mt.type);
 			string path = parent + base;
-			if (!seen.insert(path).second)
-				throw Error(mt.file, mt.line, "物理路径冲突：" + path + " 挂载了不止一次");
+			if (!seen.insert(path).second) {
+				errors.push_back(Error(mt.file, mt.line, "物理路径冲突：" + path + " 挂载了不止一次"));
+				continue;
+			}
+			if (dry) continue;   // 检查不展开文本：未定义与环由 walk_chunks 报
 			auto it = doc.files.find(file_key(mt.name, mt.type));
 			if (it == doc.files.end() || !it->second.touched) continue;   // 没写内容：不落盘
 			write_file(root + "/" + path, file_text(doc, it->second, line_mode));
@@ -203,15 +404,18 @@ $$
 
 	}  // namespace
 
-	// 铺盘：从 top 开始，返回写了几个文件。
+	// 铺盘：从 top 开始，返回写了几个文件。检查归 check，这里只管写。
 	int tangle(const Document& doc, const string& outdir, bool line_mode) {
 		auto top = doc.dirs.find("top");
 		if (top == doc.dirs.end() || !top->second.declared)
 			throw Error(doc.main_file, 0, "缺少 dir top @（tangle 的根只能由 @ 建立）");
 		std::filesystem::create_directories(outdir);
 		set<string> seen;
+		vector<Error> errors;
 		int written = 0;
-		walk(doc, outdir, "", top->second, line_mode, seen, written);
+		walk(doc, outdir, "", top->second, line_mode, false, seen, written, errors);
+		// 直接调 API 的人没先跑 check：至少别静默地写半棵树。
+		if (!errors.empty()) throw errors.front();
 		return written;
 	}
 ~@
@@ -226,7 +430,7 @@ $$
 	}  // namespace nw
 ~@
 
-## 七、不做什么
+## 八、不做什么
 
 v2 的 `tangle` 里有两件事，v3 一件都不做：
 
