@@ -82,7 +82,7 @@ file<js> gen-grammar @
 	{
 	  "name": "nw",
 	  "displayName": "Better Neoweb",
-	  "description": "Neoweb 文学编程的语法、块体着色与片段。",
+	  "description": "Syntax, block-body colouring and snippets for Neoweb literate programming.",
 	  "icon": "./icons/icon.png",
 	  "version": "0.2.0",
 	  "publisher": "random25160765-collab",
@@ -131,7 +131,7 @@ file<js> gen-grammar @
 	    "commands": [
 	      {
 	        "command": "nw.enter",
-	        "title": "Neoweb: 开一个块（补上 ~@）"
+	        "title": "Neoweb: open a chunk (and its ~@)"
 	      }
 	    ],
 	    "keybindings": [
@@ -256,62 +256,62 @@ v3 有七种头，七种模板。片段的作用不是省字，是**让作者每
 	  "chunk": {
 	    "prefix": "chunk",
 	    "body": ["<< ${1:name} >>= @", "\t$0", "~@"],
-	    "description": "块：<< 名字 >>= @ + 缩进一级的代码 + 顶格 ~@"
+	    "description": "Chunk: << name >>= @ plus an indented body and a flush ~@"
 	  },
 	  "wire": {
 	    "prefix": "file",
 	    "body": ["file<${1:cpp}> ${2:name} @", "\t$0", "~@"],
-	    "description": "接线：一个产物由哪些块组成"
+	    "description": "File: which chunks make up one artifact"
 	  },
 	  "dir": {
 	    "prefix": "dir",
 	    "body": ["dir ${1:name} @", "\t$0", "~@"],
-	    "description": "目录：只装挂载"
+	    "description": "Directory: mounts only"
 	  },
 	  "book": {
 	    "prefix": "book",
 	    "body": ["book ${1:name} @", "\tname ${2:title};", "\tpart ${3:first};", "\tessay ${4:path};", "~@"],
-	    "description": "书：全项目只有一本，先序就是页序与装配序"
+	    "description": "Book: exactly one per project; pre-order is page and assembly order"
 	  },
 	  "part": {
 	    "prefix": "part",
 	    "body": ["part ${1:name} @", "\tname ${2:title};", "\t$0", "~@"],
-	    "description": "部：体里可以再放 part 与 essay"
+	    "description": "Part: a body may hold more parts and essays"
 	  },
 	  "essay": {
 	    "prefix": "essay",
 	    "body": ["essay ${1:path};"],
-	    "description": "散篇：书或部里收一篇 .nw"
+	    "description": "Essay: one .nw file collected by the book or a part"
 	  },
 	  "fileapp": {
 	    "prefix": "fileapp",
 	    "body": ["file<${1:cpp}> ${2:name} += @", "\t$0", "~@"],
-	    "description": "追加接线：往已有的产物后面接一段"
+	    "description": "Append to a file: extend an existing artifact"
 	  },
 	  "dirapp": {
 	    "prefix": "dirapp",
 	    "body": ["dir ${1:name} += @", "\t$0", "~@"],
-	    "description": "追加目录：往已有的目录里再挂几样"
+	    "description": "Append to a directory: mount more entries"
 	  },
 	  "append": {
 	    "prefix": "append",
 	    "body": ["${1:dir} ${2:name} += ${3:dir} ${4:target};"],
-	    "description": "单行追加：+= 后面只跟一个目标"
+	    "description": "Single-line append: += followed by one target"
 	  },
 	  "mount": {
 	    "prefix": "mount",
 	    "body": ["file<${1:cpp}> ${2:name};"],
-	    "description": "挂载：把一个文件挂进当前目录"
+	    "description": "Mount: hang a file under the current directory"
 	  },
 	  "space": {
 	    "prefix": "space",
 	    "body": ["!! ${1:util}::", "$0", "~::"],
-	    "description": "命名空间：让七个示例都能有 << main >>"
+	    "description": "Namespace: lets several examples each own a << main >>"
 	  },
 	  "ref": {
 	    "prefix": "ref",
 	    "body": ["<< ${1:name} >>"],
-	    "description": "引用：把一个块贴到这里"
+	    "description": "Reference: paste a chunk here"
 	  }
 	}
 ~@
@@ -1004,10 +1004,11 @@ v2 的块名里带产物路径（`<<src/sort.c: merge>>=`），所以语言是"�
 	    );
 	  } else {
 	    vscode.window.showErrorMessage(
-	      "Neoweb：语义着色未启用（" + tokenizeError.message + "）。在 tangle/editor 下跑 npm install，然后重载窗口。"
+	      "Neoweb: semantic colouring is off (" + tokenizeError.message +
+	      "). Run npm install under tangle/editor, then reload the window."
 	    );
 	  }
-	  console.log("neoweb: 已激活（scope 由 TextMate 给，颜色由编辑器按主题上）");
+	  console.log("neoweb: activated (scopes come from TextMate, colours from the theme)");
 	}
 
 	function deactivate() {}
